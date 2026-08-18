@@ -13,6 +13,3 @@ wheels/
 *.pickle
 *.pkl
 data/
-
-app/global_output.txt
-app/ingestion/ocrizer.py
