@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Ignore data and large pickle files
+*.pickle
+*.pkl
+data/
+
+app/global_output.txt
+app/ingestion/ocrizer.py

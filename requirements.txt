@@ -1,0 +1,27 @@
+uv init .
+uv venv --python 3.11
+.venv\Scripts\activate
+.venv\Scripts\python -m ensurepip --upgrade
+python -m pip install --upgrade pip
+python -m pip install -U pip setuptools wheel
+python -m pip install numpy
+
+pip install torch==2.7.0+cu128 torchvision==0.22.0+cu128 torchaudio==2.7.0+cu128 --index-url https://download.pytorch.org/whl/cu128
+
+pip install fuzzywuzzy python-Levenshtein
+pip install rapidfuzz
+
+pip install -U sentence-transformers
+pip install -U faiss-cpu
+pip install einops
+
+pip install PyMuPDF
+pip install python-docx
+pip install pywin32
+pip install requests
+
+pip install flask numpy flask_cors python-dotenv scipy
+pip install waitress
+pip install pillow
+pip install pyinstaller
+python -m PyInstaller --onefile --noconsole docopen_handler.py

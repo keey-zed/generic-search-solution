@@ -1,0 +1,5312 @@
+C:\Users\Abderrahman\Desktop\new_legal_ai\backend_BO\app\data_loader.py
+
+import os
+import pickle
+import tempfile
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+# -------------------------------------------------------------------
+# Stable module-level containers
+# IMPORTANT: keep the SAME list objects forever to avoid stale refs
+# -------------------------------------------------------------------
+
+# Core searchable page corpus
+chunks = []
+page_numbers = []
+paths = []
+
+# Legal metadata
+filenames = []
+subjects_list = []
+signatures_list = []
+doctypes = []
+lawnumbers = []
+dates = []           # raw ISO string as stored/displayed
+dates_parsed = []    # parsed datetime or None
+
+# -------------------------------------------------------------------
+# Compatibility aliases for the old book-based code
+# These aliases intentionally point to meaningful legal equivalents
+# so old code does not crash immediately while routes are refactored.
+# -------------------------------------------------------------------
+book_names = filenames                 # old "book_name" -> new filename
+Subject_list = subjects_list           # old Subjects -> new subjects
+categories = doctypes                  # closest old analogue
+printed_page_numbers = page_numbers    # no separate printed page concept now
+
+# authors has no equivalent in the legal schema, but keep it aligned
+authors = []
+
+# Incremented whenever data is reloaded/updated
+DATA_VERSION = 0
+
+
+# -------------------------------------------------------------------
+# Paths
+# -------------------------------------------------------------------
+def _app_root() -> Path:
+    # app/ is inside backend_BO/app, so parent is backend_BO
+    return Path(__file__).resolve().parent.parent
+
+
+def data_dir() -> Path:
+    return _app_root() / "data"
+
+
+def _chunks_pickle_path() -> Path:
+    # backend_BO/data/books_chunks.pickle
+    # Kept as-is because your current project description indicates
+    # the main page corpus pickle still lives here for now.
+    return data_dir() / "books_chunks.pickle"
+
+
+def documents_root_dir() -> Path:
+    # New legal PDFs location
+    return data_dir() / "book_documents" / "books_pdf"
+
+
+def get_document_abs_path(rel_path: str) -> Path:
+    return documents_root_dir() / _normalize_rel_path(rel_path)
+
+
+# Backward-compatible names
+def books_root_dir() -> Path:
+    return documents_root_dir()
+
+
+def get_book_abs_path(rel_path: str) -> Path:
+    return get_document_abs_path(rel_path)
+
+
+# -------------------------------------------------------------------
+# Coercion / normalization helpers
+# -------------------------------------------------------------------
+def _normalize_rel_path(p) -> str:
+    """
+    Normalize a relative file path for URL + filesystem join:
+      - convert backslashes to slashes
+      - strip leading slashes
+      - keep it relative
+    """
+    if p is None:
+        return ""
+    s = str(p).strip().replace("\\", "/")
+    s = s.lstrip("/")
+    return s
+
+
+def _coerce_str(v) -> str:
+    if v is None:
+        return ""
+    return str(v).strip()
+
+
+def _coerce_str_list(v):
+    """
+    Ensures metadata fields are always list[str].
+
+    Accepts:
+      - None
+      - str
+      - list / tuple / set
+      - mixed values
+
+    Also splits common separators when a single string contains many items.
+    """
+    if v is None:
+        return []
+
+    if isinstance(v, (list, tuple, set)):
+        out = []
+        for x in v:
+            s = str(x).strip()
+            if s:
+                out.append(s)
+        return out
+
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return []
+        seps = [";", ",", "|", "،", "\n", "\t"]
+        for sep in seps:
+            if sep in s:
+                parts = [p.strip() for p in s.split(sep)]
+                return [p for p in parts if p]
+        return [s]
+
+    s = str(v).strip()
+    return [s] if s else []
+
+
+def _coerce_page_number(v):
+    """
+    Keep page_number flexible:
+      - int if clean integer
+      - stripped string otherwise
+      - None if empty
+    """
+    if v is None:
+        return None
+
+    if isinstance(v, int):
+        return v
+
+    s = str(v).strip()
+    if not s:
+        return None
+
+    try:
+        return int(s)
+    except Exception:
+        return s
+
+
+def _parse_iso_datetime(v):
+    """
+    Parse legal ISO date strings safely.
+
+    Supported examples:
+      - 2018-08-16T00:00:00.000Z
+      - 2018-08-16T00:00:00Z
+      - 2018-08-16T00:00:00+00:00
+      - 2018-08-16
+
+    Returns:
+      datetime (timezone-aware when possible) or None
+    """
+    if v is None:
+        return None
+
+    s = str(v).strip()
+    if not s:
+        return None
+
+    # Normalize trailing Z
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+
+    # Try full ISO first
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        pass
+
+    # Try date-only
+    try:
+        dt = datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _choose_path(item: dict, filename: str) -> str:
+    """
+    Path priority:
+      1) explicit item['path']
+      2) item['filename']
+      3) empty string
+    """
+    raw_path = _coerce_str(item.get("path"))
+    if raw_path:
+        return _normalize_rel_path(raw_path)
+
+    if filename:
+        return _normalize_rel_path(filename)
+
+    return ""
+
+
+# -------------------------------------------------------------------
+# Core load
+# -------------------------------------------------------------------
+def load_chunks():
+    """
+    Loads the legal corpus pickle into module-level lists.
+
+    Expected legal fields per record:
+      - filename
+      - text
+      - page_number
+      - subjects
+      - signatures
+      - doctype
+      - lawnumber
+      - date
+      - path (optional)
+
+    IMPORTANT:
+      We mutate lists in-place to avoid stale references in other modules.
+    """
+    global DATA_VERSION
+
+    pickle_path = _chunks_pickle_path()
+    if not pickle_path.exists():
+        raise FileNotFoundError(f"Pickle not found: {pickle_path}")
+
+    with open(pickle_path, "rb") as f:
+        data = pickle.load(f) or []
+
+    new_chunks = []
+    new_page_numbers = []
+    new_paths = []
+
+    new_filenames = []
+    new_subjects_list = []
+    new_signatures_list = []
+    new_doctypes = []
+    new_lawnumbers = []
+    new_dates = []
+    new_dates_parsed = []
+
+    new_authors = []  # compatibility only
+
+    for item in data:
+        text = item.get("text", "")
+        filename = _coerce_str(item.get("filename"))
+        page_number = _coerce_page_number(item.get("page_number"))
+        subjects = _coerce_str_list(item.get("subjects", item.get("Subjects")))
+        signatures = _coerce_str_list(item.get("signatures"))
+        doctype = _coerce_str(item.get("doctype"))
+        lawnumber = _coerce_str(item.get("lawnumber"))
+        raw_date = _coerce_str(item.get("date"))
+        parsed_date = _parse_iso_datetime(raw_date)
+        rel_path = _choose_path(item, filename)
+
+        new_chunks.append(text if text is not None else "")
+        new_page_numbers.append(page_number)
+        new_paths.append(rel_path)
+
+        new_filenames.append(filename)
+        new_subjects_list.append(subjects)
+        new_signatures_list.append(signatures)
+        new_doctypes.append(doctype)
+        new_lawnumbers.append(lawnumber)
+        new_dates.append(raw_date)
+        new_dates_parsed.append(parsed_date)
+
+        # no author in legal schema; keep compatibility list aligned
+        new_authors.append("")
+
+    # In-place mutation to preserve object identity
+    chunks.clear()
+    chunks.extend(new_chunks)
+
+    page_numbers.clear()
+    page_numbers.extend(new_page_numbers)
+
+    paths.clear()
+    paths.extend(new_paths)
+
+    filenames.clear()
+    filenames.extend(new_filenames)
+
+    subjects_list.clear()
+    subjects_list.extend(new_subjects_list)
+
+    signatures_list.clear()
+    signatures_list.extend(new_signatures_list)
+
+    doctypes.clear()
+    doctypes.extend(new_doctypes)
+
+    lawnumbers.clear()
+    lawnumbers.extend(new_lawnumbers)
+
+    dates.clear()
+    dates.extend(new_dates)
+
+    dates_parsed.clear()
+    dates_parsed.extend(new_dates_parsed)
+
+    authors.clear()
+    authors.extend(new_authors)
+
+    DATA_VERSION += 1
+
+
+# -------------------------------------------------------------------
+# Compatibility alias: many modules still call them "pages/chunks"
+# -------------------------------------------------------------------
+def load_pages():
+    return load_chunks()
+
+
+# -------------------------------------------------------------------
+# Summaries
+# -------------------------------------------------------------------
+def compute_documents_summary():
+    """
+    Returns:
+      {
+        "total_documents": int,
+        "total_pages": int,
+        "documents": [
+          {
+            "filename": str,
+            "doctype": str,
+            "lawnumber": str,
+            "date": str,
+            "pages": int
+          }
+        ],
+        "data_version": int
+      }
+
+    Pages are counted as number of unique non-null page_number values per file.
+    If page numbers are all missing for a file, we fall back to counting rows.
+    """
+    pages_by_filename = defaultdict(set)
+    rows_by_filename = defaultdict(int)
+    first_doctype = {}
+    first_lawnumber = {}
+    first_date = {}
+
+    for i, fname in enumerate(filenames):
+        fname = (fname or "").strip()
+        if not fname:
+            continue
+
+        rows_by_filename[fname] += 1
+
+        if fname not in first_doctype:
+            first_doctype[fname] = (doctypes[i] or "").strip()
+        if fname not in first_lawnumber:
+            first_lawnumber[fname] = (lawnumbers[i] or "").strip()
+        if fname not in first_date:
+            first_date[fname] = (dates[i] or "").strip()
+
+        p = page_numbers[i] if i < len(page_numbers) else None
+        if p is not None:
+            pages_by_filename[fname].add(str(p))
+
+    documents = []
+    total_pages = 0
+
+    for fname in sorted(rows_by_filename.keys()):
+        page_count = len(pages_by_filename[fname]) if pages_by_filename[fname] else rows_by_filename[fname]
+        total_pages += page_count
+
+        documents.append({
+            "filename": fname,
+            "doctype": first_doctype.get(fname, ""),
+            "lawnumber": first_lawnumber.get(fname, ""),
+            "date": first_date.get(fname, ""),
+            "pages": page_count,
+        })
+
+    return {
+        "total_documents": len(documents),
+        "total_pages": total_pages,
+        "documents": documents,
+        "data_version": DATA_VERSION,
+    }
+
+
+def compute_books_summary():
+    """
+    Backward-compatible wrapper so old routes do not explode immediately.
+    """
+    docs = compute_documents_summary()
+    return {
+        "total_books": docs["total_documents"],
+        "total_pages": docs["total_pages"],
+        "books": [
+            {
+                "book_name": d["filename"],
+                "author": "",
+                "category": d["doctype"],
+                "pages": d["pages"],
+            }
+            for d in docs["documents"]
+        ],
+        "data_version": docs["data_version"],
+    }
+
+
+# -------------------------------------------------------------------
+# Optional metadata update helpers
+# -------------------------------------------------------------------
+def _atomic_write_pickle(path: Path, data_obj):
+    """
+    Atomic write: write temp then replace.
+    Works on Windows via os.replace.
+    """
+    path = Path(path)
+    tmp_dir = path.parent
+    fd, tmp_name = tempfile.mkstemp(prefix=path.stem + "_", suffix=".tmp", dir=str(tmp_dir))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            pickle.dump(data_obj, f)
+        os.replace(tmp_name, str(path))
+    finally:
+        try:
+            if os.path.exists(tmp_name):
+                os.remove(tmp_name)
+        except Exception:
+            pass
+
+
+def update_document_metadata(
+    filename: str,
+    new_doctype=None,
+    new_lawnumber=None,
+    new_date=None,
+    new_subjects=None,
+    new_signatures=None,
+    new_path=None,
+):
+    """
+    Update metadata for all rows belonging to one filename inside the main pickle.
+    This is optional, but useful if you later keep an admin metadata editor.
+
+    Fields updated only when explicitly provided.
+    """
+    global DATA_VERSION
+
+    target = _coerce_str(filename)
+    if not target:
+        raise ValueError("filename is required")
+
+    pickle_path = _chunks_pickle_path()
+    if not pickle_path.exists():
+        raise FileNotFoundError(f"Pickle not found: {pickle_path}")
+
+    with open(pickle_path, "rb") as f:
+        data = pickle.load(f) or []
+
+    changed = 0
+    for item in data:
+        item_filename = _coerce_str(item.get("filename"))
+        if item_filename != target:
+            continue
+
+        if new_doctype is not None:
+            item["doctype"] = _coerce_str(new_doctype)
+        if new_lawnumber is not None:
+            item["lawnumber"] = _coerce_str(new_lawnumber)
+        if new_date is not None:
+            item["date"] = _coerce_str(new_date)
+        if new_subjects is not None:
+            item["subjects"] = _coerce_str_list(new_subjects)
+        if new_signatures is not None:
+            item["signatures"] = _coerce_str_list(new_signatures)
+        if new_path is not None:
+            item["path"] = _normalize_rel_path(new_path)
+
+        changed += 1
+
+    if changed == 0:
+        raise ValueError("filename not found")
+
+    _atomic_write_pickle(pickle_path, data)
+
+    # simplest + safest: full reload so all aligned arrays stay correct
+    load_chunks()
+
+    return {
+        "ok": True,
+        "updated_rows": changed,
+        "data_version": DATA_VERSION,
+    }
+
+
+def update_book_metadata(book_name: str, new_author: str = None, new_category: str = None):
+    """
+    Backward-compatible wrapper.
+
+    Old code used:
+      - book_name
+      - new_author
+      - new_category
+
+    Here:
+      - book_name maps to filename
+      - new_category maps to doctype
+      - new_author is ignored because the legal schema has no author field
+    """
+    return update_document_metadata(
+        filename=book_name,
+        new_doctype=new_category,
+    )
+
+
+# -------------------------------------------------------------------
+# Semantic-search helper paths
+# These remain essentially unchanged.
+# -------------------------------------------------------------------
+def embeddings_dir() -> Path:
+    return data_dir() / "embeddings"
+
+
+def semantic_chunks_pickle_path() -> Path:
+    return data_dir() / "chunks_tobe_embedded.pickle"
+
+
+def semantic_chunk_page_mapping_pickle_path() -> Path:
+    return data_dir() / "mapping_chunks_tobe_embedded_to_pages.pickle"
+
+
+def _first_existing_path(candidates, label: str = "file") -> Path:
+    for p in candidates:
+        pp = Path(p)
+        if pp.exists():
+            return pp
+    tried = "\n".join(str(Path(p)) for p in candidates)
+    raise FileNotFoundError(f"Missing {label}. Tried:\n{tried}")
+
+
+def semantic_embeddings_pickle_paths() -> dict:
+    emb = embeddings_dir()
+
+    bge3 = _first_existing_path(
+        [
+            emb / "embeddings_bge3_FULL.pickle",
+            emb / "embeddings_bge3.pickle",
+        ],
+        label="BGE3 embeddings pickle",
+    )
+
+    e5 = _first_existing_path(
+        [
+            emb / "embeddings_e5_FULL.pickle",
+            emb / "embeddings_e5.pickle",
+        ],
+        label="E5 embeddings pickle",
+    )
+
+    jinav3 = _first_existing_path(
+        [
+            emb / "embeddings_jinav3_FULL.pickle",
+            emb / "embeddings_jina_FULL.pickle",
+            emb / "embeddings_jina.pickle",
+        ],
+        label="Jina embeddings pickle",
+    )
+
+    return {
+        "bge3": bge3,
+        "e5": e5,
+        "jinav3": jinav3,
+    }
+
+
+def semantic_embeddings_pickle_paths_optional() -> dict:
+    emb = embeddings_dir()
+
+    e5 = _first_existing_path(
+        [
+            emb / "embeddings_e5_FULL.pickle",
+            emb / "embeddings_e5.pickle",
+        ],
+        label="E5 embeddings pickle",
+    )
+
+    jinav3 = _first_existing_path(
+        [
+            emb / "embeddings_jinav3_FULL.pickle",
+            emb / "embeddings_jina_FULL.pickle",
+            emb / "embeddings_jina.pickle",
+        ],
+        label="Jina embeddings pickle",
+    )
+
+    bge3 = None
+    for p in [
+        emb / "embeddings_bge3_FULL.pickle",
+        emb / "embeddings_bge3.pickle",
+        emb / "embeddings_bge3_10k.pickle",
+    ]:
+        if Path(p).exists():
+            bge3 = Path(p)
+            break
+
+    return {
+        "bge3": bge3,
+        "e5": e5,
+        "jinav3": jinav3,
+    }
+
+######
+
+C:\Users\Abderrahman\Desktop\new_legal_ai\backend_BO\app\global_output.txt
+
+C:\Users\Abderrahman\Desktop\new_legal_ai\backend_BO\app\data_loader.py
+
+import os
+import pickle
+import tempfile
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+# -------------------------------------------------------------------
+# Stable module-level containers
+# IMPORTANT: keep the SAME list objects forever to avoid stale refs
+# -------------------------------------------------------------------
+
+# Core searchable page corpus
+chunks = []
+page_numbers = []
+paths = []
+
+# Legal metadata
+filenames = []
+subjects_list = []
+signatures_list = []
+doctypes = []
+lawnumbers = []
+dates = []           # raw ISO string as stored/displayed
+dates_parsed = []    # parsed datetime or None
+
+# -------------------------------------------------------------------
+# Compatibility aliases for the old book-based code
+# These aliases intentionally point to meaningful legal equivalents
+# so old code does not crash immediately while routes are refactored.
+# -------------------------------------------------------------------
+book_names = filenames                 # old "book_name" -> new filename
+Subject_list = subjects_list           # old Subjects -> new subjects
+categories = doctypes                  # closest old analogue
+printed_page_numbers = page_numbers    # no separate printed page concept now
+
+# authors has no equivalent in the legal schema, but keep it aligned
+authors = []
+
+# Incremented whenever data is reloaded/updated
+DATA_VERSION = 0
+
+
+# -------------------------------------------------------------------
+# Paths
+# -------------------------------------------------------------------
+def _app_root() -> Path:
+    # app/ is inside backend_BO/app, so parent is backend_BO
+    return Path(__file__).resolve().parent.parent
+
+
+def data_dir() -> Path:
+    return _app_root() / "data"
+
+
+def _chunks_pickle_path() -> Path:
+    # backend_BO/data/books_chunks.pickle
+    # Kept as-is because your current project description indicates
+    # the main page corpus pickle still lives here for now.
+    return data_dir() / "books_chunks.pickle"
+
+
+def documents_root_dir() -> Path:
+    # New legal PDFs location
+    return data_dir() / "book_documents" / "books_pdf"
+
+
+def get_document_abs_path(rel_path: str) -> Path:
+    return documents_root_dir() / _normalize_rel_path(rel_path)
+
+
+# Backward-compatible names
+def books_root_dir() -> Path:
+    return documents_root_dir()
+
+
+def get_book_abs_path(rel_path: str) -> Path:
+    return get_document_abs_path(rel_path)
+
+
+# -------------------------------------------------------------------
+# Coercion / normalization helpers
+# -------------------------------------------------------------------
+def _normalize_rel_path(p) -> str:
+    """
+    Normalize a relative file path for URL + filesystem join:
+      - convert backslashes to slashes
+      - strip leading slashes
+      - keep it relative
+    """
+    if p is None:
+        return ""
+    s = str(p).strip().replace("\\", "/")
+    s = s.lstrip("/")
+    return s
+
+
+def _coerce_str(v) -> str:
+    if v is None:
+        return ""
+    return str(v).strip()
+
+
+def _coerce_str_list(v):
+    """
+    Ensures metadata fields are always list[str].
+
+    Accepts:
+      - None
+      - str
+      - list / tuple / set
+      - mixed values
+
+    Also splits common separators when a single string contains many items.
+    """
+    if v is None:
+        return []
+
+    if isinstance(v, (list, tuple, set)):
+        out = []
+        for x in v:
+            s = str(x).strip()
+            if s:
+                out.append(s)
+        return out
+
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return []
+        seps = [";", ",", "|", "،", "\n", "\t"]
+        for sep in seps:
+            if sep in s:
+                parts = [p.strip() for p in s.split(sep)]
+                return [p for p in parts if p]
+        return [s]
+
+    s = str(v).strip()
+    return [s] if s else []
+
+
+def _coerce_page_number(v):
+    """
+    Keep page_number flexible:
+      - int if clean integer
+      - stripped string otherwise
+      - None if empty
+    """
+    if v is None:
+        return None
+
+    if isinstance(v, int):
+        return v
+
+    s = str(v).strip()
+    if not s:
+        return None
+
+    try:
+        return int(s)
+    except Exception:
+        return s
+
+
+def _parse_iso_datetime(v):
+    """
+    Parse legal ISO date strings safely.
+
+    Supported examples:
+      - 2018-08-16T00:00:00.000Z
+      - 2018-08-16T00:00:00Z
+      - 2018-08-16T00:00:00+00:00
+      - 2018-08-16
+
+    Returns:
+      datetime (timezone-aware when possible) or None
+    """
+    if v is None:
+        return None
+
+    s = str(v).strip()
+    if not s:
+        return None
+
+    # Normalize trailing Z
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+
+    # Try full ISO first
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        pass
+
+    # Try date-only
+    try:
+        dt = datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _choose_path(item: dict, filename: str) -> str:
+    """
+    Path priority:
+      1) explicit item['path']
+      2) item['filename']
+      3) empty string
+    """
+    raw_path = _coerce_str(item.get("path"))
+    if raw_path:
+        return _normalize_rel_path(raw_path)
+
+    if filename:
+        return _normalize_rel_path(filename)
+
+    return ""
+
+
+# -------------------------------------------------------------------
+# Core load
+# -------------------------------------------------------------------
+def load_chunks():
+    """
+    Loads the legal corpus pickle into module-level lists.
+
+    Expected legal fields per record:
+      - filename
+      - text
+      - page_number
+      - subjects
+      - signatures
+      - doctype
+      - lawnumber
+      - date
+      - path (optional)
+
+    IMPORTANT:
+      We mutate lists in-place to avoid stale references in other modules.
+    """
+    global DATA_VERSION
+
+    pickle_path = _chunks_pickle_path()
+    if not pickle_path.exists():
+        raise FileNotFoundError(f"Pickle not found: {pickle_path}")
+
+    with open(pickle_path, "rb") as f:
+        data = pickle.load(f) or []
+
+    new_chunks = []
+    new_page_numbers = []
+    new_paths = []
+
+    new_filenames = []
+    new_subjects_list = []
+    new_signatures_list = []
+    new_doctypes = []
+    new_lawnumbers = []
+    new_dates = []
+    new_dates_parsed = []
+
+    new_authors = []  # compatibility only
+
+    for item in data:
+        text = item.get("text", "")
+        filename = _coerce_str(item.get("filename"))
+        page_number = _coerce_page_number(item.get("page_number"))
+        subjects = _coerce_str_list(item.get("subjects", item.get("Subjects")))
+        signatures = _coerce_str_list(item.get("signatures"))
+        doctype = _coerce_str(item.get("doctype"))
+        lawnumber = _coerce_str(item.get("lawnumber"))
+        raw_date = _coerce_str(item.get("date"))
+        parsed_date = _parse_iso_datetime(raw_date)
+        rel_path = _choose_path(item, filename)
+
+        new_chunks.append(text if text is not None else "")
+        new_page_numbers.append(page_number)
+        new_paths.append(rel_path)
+
+        new_filenames.append(filename)
+        new_subjects_list.append(subjects)
+        new_signatures_list.append(signatures)
+        new_doctypes.append(doctype)
+        new_lawnumbers.append(lawnumber)
+        new_dates.append(raw_date)
+        new_dates_parsed.append(parsed_date)
+
+        # no author in legal schema; keep compatibility list aligned
+        new_authors.append("")
+
+    # In-place mutation to preserve object identity
+    chunks.clear()
+    chunks.extend(new_chunks)
+
+    page_numbers.clear()
+    page_numbers.extend(new_page_numbers)
+
+    paths.clear()
+    paths.extend(new_paths)
+
+    filenames.clear()
+    filenames.extend(new_filenames)
+
+    subjects_list.clear()
+    subjects_list.extend(new_subjects_list)
+
+    signatures_list.clear()
+    signatures_list.extend(new_signatures_list)
+
+    doctypes.clear()
+    doctypes.extend(new_doctypes)
+
+    lawnumbers.clear()
+    lawnumbers.extend(new_lawnumbers)
+
+    dates.clear()
+    dates.extend(new_dates)
+
+    dates_parsed.clear()
+    dates_parsed.extend(new_dates_parsed)
+
+    authors.clear()
+    authors.extend(new_authors)
+
+    DATA_VERSION += 1
+
+
+# -------------------------------------------------------------------
+# Compatibility alias: many modules still call them "pages/chunks"
+# -------------------------------------------------------------------
+def load_pages():
+    return load_chunks()
+
+
+# -------------------------------------------------------------------
+# Summaries
+# -------------------------------------------------------------------
+def compute_documents_summary():
+    """
+    Returns:
+      {
+        "total_documents": int,
+        "total_pages": int,
+        "documents": [
+          {
+            "filename": str,
+            "doctype": str,
+            "lawnumber": str,
+            "date": str,
+            "pages": int
+          }
+        ],
+        "data_version": int
+      }
+
+    Pages are counted as number of unique non-null page_number values per file.
+    If page numbers are all missing for a file, we fall back to counting rows.
+    """
+    pages_by_filename = defaultdict(set)
+    rows_by_filename = defaultdict(int)
+    first_doctype = {}
+    first_lawnumber = {}
+    first_date = {}
+
+    for i, fname in enumerate(filenames):
+        fname = (fname or "").strip()
+        if not fname:
+            continue
+
+        rows_by_filename[fname] += 1
+
+        if fname not in first_doctype:
+            first_doctype[fname] = (doctypes[i] or "").strip()
+        if fname not in first_lawnumber:
+            first_lawnumber[fname] = (lawnumbers[i] or "").strip()
+        if fname not in first_date:
+            first_date[fname] = (dates[i] or "").strip()
+
+        p = page_numbers[i] if i < len(page_numbers) else None
+        if p is not None:
+            pages_by_filename[fname].add(str(p))
+
+    documents = []
+    total_pages = 0
+
+    for fname in sorted(rows_by_filename.keys()):
+        page_count = len(pages_by_filename[fname]) if pages_by_filename[fname] else rows_by_filename[fname]
+        total_pages += page_count
+
+        documents.append({
+            "filename": fname,
+            "doctype": first_doctype.get(fname, ""),
+            "lawnumber": first_lawnumber.get(fname, ""),
+            "date": first_date.get(fname, ""),
+            "pages": page_count,
+        })
+
+    return {
+        "total_documents": len(documents),
+        "total_pages": total_pages,
+        "documents": documents,
+        "data_version": DATA_VERSION,
+    }
+
+
+def compute_books_summary():
+    """
+    Backward-compatible wrapper so old routes do not explode immediately.
+    """
+    docs = compute_documents_summary()
+    return {
+        "total_books": docs["total_documents"],
+        "total_pages": docs["total_pages"],
+        "books": [
+            {
+                "book_name": d["filename"],
+                "author": "",
+                "category": d["doctype"],
+                "pages": d["pages"],
+            }
+            for d in docs["documents"]
+        ],
+        "data_version": docs["data_version"],
+    }
+
+
+# -------------------------------------------------------------------
+# Optional metadata update helpers
+# -------------------------------------------------------------------
+def _atomic_write_pickle(path: Path, data_obj):
+    """
+    Atomic write: write temp then replace.
+    Works on Windows via os.replace.
+    """
+    path = Path(path)
+    tmp_dir = path.parent
+    fd, tmp_name = tempfile.mkstemp(prefix=path.stem + "_", suffix=".tmp", dir=str(tmp_dir))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            pickle.dump(data_obj, f)
+        os.replace(tmp_name, str(path))
+    finally:
+        try:
+            if os.path.exists(tmp_name):
+                os.remove(tmp_name)
+        except Exception:
+            pass
+
+
+def update_document_metadata(
+    filename: str,
+    new_doctype=None,
+    new_lawnumber=None,
+    new_date=None,
+    new_subjects=None,
+    new_signatures=None,
+    new_path=None,
+):
+    """
+    Update metadata for all rows belonging to one filename inside the main pickle.
+    This is optional, but useful if you later keep an admin metadata editor.
+
+    Fields updated only when explicitly provided.
+    """
+    global DATA_VERSION
+
+    target = _coerce_str(filename)
+    if not target:
+        raise ValueError("filename is required")
+
+    pickle_path = _chunks_pickle_path()
+    if not pickle_path.exists():
+        raise FileNotFoundError(f"Pickle not found: {pickle_path}")
+
+    with open(pickle_path, "rb") as f:
+        data = pickle.load(f) or []
+
+    changed = 0
+    for item in data:
+        item_filename = _coerce_str(item.get("filename"))
+        if item_filename != target:
+            continue
+
+        if new_doctype is not None:
+            item["doctype"] = _coerce_str(new_doctype)
+        if new_lawnumber is not None:
+            item["lawnumber"] = _coerce_str(new_lawnumber)
+        if new_date is not None:
+            item["date"] = _coerce_str(new_date)
+        if new_subjects is not None:
+            item["subjects"] = _coerce_str_list(new_subjects)
+        if new_signatures is not None:
+            item["signatures"] = _coerce_str_list(new_signatures)
+        if new_path is not None:
+            item["path"] = _normalize_rel_path(new_path)
+
+        changed += 1
+
+    if changed == 0:
+        raise ValueError("filename not found")
+
+    _atomic_write_pickle(pickle_path, data)
+
+    # simplest + safest: full reload so all aligned arrays stay correct
+    load_chunks()
+
+    return {
+        "ok": True,
+        "updated_rows": changed,
+        "data_version": DATA_VERSION,
+    }
+
+
+def update_book_metadata(book_name: str, new_author: str = None, new_category: str = None):
+    """
+    Backward-compatible wrapper.
+
+    Old code used:
+      - book_name
+      - new_author
+      - new_category
+
+    Here:
+      - book_name maps to filename
+      - new_category maps to doctype
+      - new_author is ignored because the legal schema has no author field
+    """
+    return update_document_metadata(
+        filename=book_name,
+        new_doctype=new_category,
+    )
+
+
+# -------------------------------------------------------------------
+# Semantic-search helper paths
+# These remain essentially unchanged.
+# -------------------------------------------------------------------
+def embeddings_dir() -> Path:
+    return data_dir() / "embeddings"
+
+
+def semantic_chunks_pickle_path() -> Path:
+    return data_dir() / "chunks_tobe_embedded.pickle"
+
+
+def semantic_chunk_page_mapping_pickle_path() -> Path:
+    return data_dir() / "mapping_chunks_tobe_embedded_to_pages.pickle"
+
+
+def _first_existing_path(candidates, label: str = "file") -> Path:
+    for p in candidates:
+        pp = Path(p)
+        if pp.exists():
+            return pp
+    tried = "\n".join(str(Path(p)) for p in candidates)
+    raise FileNotFoundError(f"Missing {label}. Tried:\n{tried}")
+
+
+def semantic_embeddings_pickle_paths() -> dict:
+    emb = embeddings_dir()
+
+    bge3 = _first_existing_path(
+        [
+            emb / "embeddings_bge3_FULL.pickle",
+            emb / "embeddings_bge3.pickle",
+        ],
+        label="BGE3 embeddings pickle",
+    )
+
+    e5 = _first_existing_path(
+        [
+            emb / "embeddings_e5_FULL.pickle",
+            emb / "embeddings_e5.pickle",
+        ],
+        label="E5 embeddings pickle",
+    )
+
+    jinav3 = _first_existing_path(
+        [
+            emb / "embeddings_jinav3_FULL.pickle",
+            emb / "embeddings_jina_FULL.pickle",
+            emb / "embeddings_jina.pickle",
+        ],
+        label="Jina embeddings pickle",
+    )
+
+    return {
+        "bge3": bge3,
+        "e5": e5,
+        "jinav3": jinav3,
+    }
+
+
+def semantic_embeddings_pickle_paths_optional() -> dict:
+    emb = embeddings_dir()
+
+    e5 = _first_existing_path(
+        [
+            emb / "embeddings_e5_FULL.pickle",
+            emb / "embeddings_e5.pickle",
+        ],
+        label="E5 embeddings pickle",
+    )
+
+    jinav3 = _first_existing_path(
+        [
+            emb / "embeddings_jinav3_FULL.pickle",
+            emb / "embeddings_jina_FULL.pickle",
+            emb / "embeddings_jina.pickle",
+        ],
+        label="Jina embeddings pickle",
+    )
+
+    bge3 = None
+    for p in [
+        emb / "embeddings_bge3_FULL.pickle",
+        emb / "embeddings_bge3.pickle",
+        emb / "embeddings_bge3_10k.pickle",
+    ]:
+        if Path(p).exists():
+            bge3 = Path(p)
+            break
+
+    return {
+        "bge3": bge3,
+        "e5": e5,
+        "jinav3": jinav3,
+    }
+
+######
+
+C:\Users\Abderrahman\Desktop\new_legal_ai\backend_BO\app\routes.py
+
+# backend_BO/app/routes.py
+
+from flask import (
+    Blueprint,
+    request,
+    jsonify,
+    send_file,
+    Response,
+    stream_with_context,
+    url_for,
+)
+from . import data_loader
+from .services import search_fuzzy, get_valid_indices, get_filter_options
+
+import time
+import math
+import io
+import re
+from pathlib import Path
+from collections import defaultdict
+from datetime import datetime
+from werkzeug.utils import secure_filename
+
+from .semantic_engine import SemanticEngine
+
+main_bp = Blueprint("main", __name__)
+
+# -----------------------------
+# Semantic search helpers
+# -----------------------------
+_SEM_ENGINE_SINGLETON = None
+_SEM_ENGINE_INIT_ERROR = None
+
+# -----------------------------
+# Dummy admin upload job store
+# -----------------------------
+_DUMMY_ADMIN_JOBS = {}
+
+
+def _to_bool(v):
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    s = str(v).strip().lower()
+    return s in {"1", "true", "yes", "y", "on"}
+
+
+def _coerce_opt_int(v, default=None):
+    try:
+        if v is None:
+            return default
+        return int(v)
+    except Exception:
+        return default
+
+
+def _clamp_int(v, default, min_v=None, max_v=None):
+    try:
+        v = int(v)
+    except Exception:
+        v = default
+    if min_v is not None and v < min_v:
+        v = min_v
+    if max_v is not None and v > max_v:
+        v = max_v
+    return v
+
+
+def _get_semantic_engine():
+    """
+    Lazy singleton to avoid loading heavy models at app startup.
+    Forces engine.load() on first semantic request so init errors are explicit.
+    """
+    global _SEM_ENGINE_SINGLETON, _SEM_ENGINE_INIT_ERROR
+
+    if _SEM_ENGINE_SINGLETON is not None:
+        return _SEM_ENGINE_SINGLETON
+
+    if _SEM_ENGINE_INIT_ERROR is not None:
+        raise RuntimeError(_SEM_ENGINE_INIT_ERROR)
+
+    if SemanticEngine is None:
+        _SEM_ENGINE_INIT_ERROR = "SemanticEngine import failed. Check app/semantic_engine.py dependencies."
+        raise RuntimeError(_SEM_ENGINE_INIT_ERROR)
+
+    try:
+        eng = SemanticEngine()
+        eng.load()
+        _SEM_ENGINE_SINGLETON = eng
+        return _SEM_ENGINE_SINGLETON
+    except Exception as e:
+        _SEM_ENGINE_INIT_ERROR = f"Failed to initialize SemanticEngine: {e}"
+        raise RuntimeError(_SEM_ENGINE_INIT_ERROR)
+
+'''
+# Warm semantic engine at backend startup (keeps existing behavior)
+try:
+    _get_semantic_engine()
+except Exception as e:
+    import logging
+    logging.getLogger(__name__).warning("SemanticEngine startup warmup failed: %s", e)
+'''
+
+def _unique_preserve_order(seq):
+    out = []
+    seen = set()
+    for x in seq:
+        if x not in seen:
+            out.append(x)
+            seen.add(x)
+    return out
+
+
+def _parse_queries_from_args(args, is_semantic=False):
+    """
+    GET parser for /search-advanced.
+
+    Non-semantic:
+      - qs[]=...
+      - q=... split by \n into multiple entries
+
+    Semantic:
+      - one logical query only
+      - preserve line breaks inside the query
+      - if qs[] has many values, join them with '\n'
+    """
+    qs = args.getlist("qs")
+    q_single_raw = args.get("q", "")
+
+    if is_semantic:
+        if qs:
+            joined = "\n".join([str(x) for x in qs if str(x).strip()])
+            return [joined.strip()] if joined.strip() else []
+        q = "" if q_single_raw is None else str(q_single_raw)
+        return [q.strip()] if q.strip() else []
+
+    q_single = (q_single_raw or "").strip()
+    if qs:
+        queries = [x.strip() for x in qs if str(x).strip()]
+    elif q_single:
+        if "\n" in q_single:
+            queries = [x.strip() for x in q_single.split("\n") if x.strip()]
+        else:
+            queries = [q_single]
+    else:
+        queries = []
+
+    return _unique_preserve_order(queries)
+
+
+def _parse_queries_from_json(data: dict, is_semantic: bool | None = None):
+    """
+    Non-semantic:
+      - supports data['queries'] as multi-entry
+      - splits data['query'] by newline into multiple entries
+
+    Semantic:
+      - forces a SINGLE query entry
+      - preserves line breaks inside the query text
+      - if 'queries' has many entries, joins them by '\n'
+    """
+    if is_semantic is None:
+        is_semantic = bool(data.get("isSemanticSearch", False))
+
+    queries_raw = data.get("queries")
+    raw_list = []
+    if isinstance(queries_raw, (list, tuple, set)):
+        raw_list = [str(x) for x in queries_raw if str(x).strip()]
+
+    q_single_raw = data.get("query")
+    q_single = "" if q_single_raw is None else str(q_single_raw)
+
+    if is_semantic:
+        if raw_list:
+            joined = "\n".join([x for x in raw_list if x.strip()])
+            return [joined.strip()] if joined.strip() else []
+        return [q_single.strip()] if q_single.strip() else []
+
+    queries = [x.strip() for x in raw_list if x.strip()]
+
+    if not queries and q_single.strip():
+        q = q_single.strip()
+        if "\n" in q:
+            queries = [x.strip() for x in q.split("\n") if x.strip()]
+        else:
+            queries = [q]
+
+    return _unique_preserve_order(queries)
+
+
+def _sanitize_source_ranges(ranges, text_len: int):
+    """
+    Normalize and clip source_ranges to valid [start, end) slices.
+    Accepts tuples/lists or dicts with start/end.
+    """
+    out = []
+
+    if not isinstance(ranges, (list, tuple)):
+        return out
+
+    for r in ranges:
+        a = b = None
+
+        if isinstance(r, dict):
+            a = r.get("start")
+            b = r.get("end")
+        elif isinstance(r, (list, tuple)) and len(r) == 2:
+            a, b = r[0], r[1]
+        else:
+            continue
+
+        try:
+            a = int(a)
+            b = int(b)
+        except Exception:
+            continue
+
+        if b < a:
+            a, b = b, a
+
+        a = max(0, min(text_len, a))
+        b = max(0, min(text_len, b))
+
+        if b <= a:
+            continue
+
+        out.append((a, b))
+
+    if not out:
+        return []
+
+    out.sort(key=lambda x: (x[0], x[1]))
+
+    merged = [out[0]]
+    for a, b in out[1:]:
+        la, lb = merged[-1]
+        if a <= lb:
+            merged[-1] = (la, max(lb, b))
+        else:
+            merged.append((a, b))
+
+    return merged
+
+
+def _run_semantic_search(query: str, valid_indices, k: int = 300000):
+    """
+    Returns CHUNK-level hits from SemanticEngine.search(), but:
+      - if valid_indices is None or equals the full corpus: global search
+      - otherwise: auto-tune inside the filtered subset via search_in_pages()
+    """
+    q = (query or "")
+    if not q.strip():
+        return [], []
+
+    engine = _get_semantic_engine()
+
+    if valid_indices is None:
+        chunk_hits = list(engine.search(q, k=int(k)))
+        return chunk_hits, []
+
+    valid_list = list(valid_indices)
+    if len(valid_list) == 0:
+        return [], []
+
+    if len(valid_list) >= len(data_loader.chunks):
+        chunk_hits = list(engine.search(q, k=int(k)))
+        return chunk_hits, []
+
+    chunk_hits = list(engine.search_in_pages(q, valid_page_indices=valid_list, k=int(k)))
+    return chunk_hits, []
+
+
+def _paginate(items, page, page_size):
+    total = len(items)
+    if total == 0:
+        return [], {
+            "page": page,
+            "page_size": page_size,
+            "total_results": 0,
+            "total_pages": 0,
+            "has_prev": False,
+            "has_next": False,
+        }
+
+    total_pages = max(1, math.ceil(total / page_size))
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_items = items[start:end]
+
+    return page_items, {
+        "page": page,
+        "page_size": page_size,
+        "total_results": total,
+        "total_pages": total_pages,
+        "has_prev": page > 1,
+        "has_next": page < total_pages,
+    }
+
+
+def _build_item(idx: int, source_ranges=None, semantic_score=None, matched_chunk_indices=None):
+    return {
+        "id": idx,
+        "chunk": data_loader.chunks[idx],
+        "filename": data_loader.filenames[idx],
+        "page_number": data_loader.page_numbers[idx],
+        "subjects": data_loader.subjects_list[idx],
+        "signatures": data_loader.signatures_list[idx],
+        "doctype": data_loader.doctypes[idx],
+        "lawnumber": data_loader.lawnumbers[idx],
+        "date": data_loader.dates[idx],
+        "path": data_loader.paths[idx],
+        "source_ranges": source_ranges or [],
+        **({"semantic_score": semantic_score} if semantic_score is not None else {}),
+        **({"matched_chunk_indices": matched_chunk_indices or []} if matched_chunk_indices is not None else {}),
+    }
+
+
+def _build_items(result_indices):
+    return [_build_item(idx) for idx in result_indices]
+
+
+def _aggregate_chunk_hits_to_pages(chunk_hits):
+    """
+    Convert chunk-level semantic hits into page-level hits.
+
+    Rules:
+      - multiple chunks can map to the same page_index
+      - keep best semantic_score per page
+      - merge source_ranges across chunks for that page
+    """
+    by_page = {}
+
+    for hit in chunk_hits:
+        if not isinstance(hit, dict):
+            continue
+
+        page_idx = _coerce_opt_int(hit.get("page_index"), default=None)
+        if page_idx is None:
+            continue
+
+        page_text = ""
+        if 0 <= page_idx < len(data_loader.chunks):
+            page_text = data_loader.chunks[page_idx] or ""
+
+        text_len = len(page_text)
+        sr = _sanitize_source_ranges(hit.get("source_ranges", []), text_len=text_len)
+
+        try:
+            score = float(hit.get("semantic_score", 0.0))
+        except Exception:
+            score = 0.0
+
+        row = by_page.get(page_idx)
+        if row is None:
+            by_page[page_idx] = {
+                "page_index": page_idx,
+                "semantic_score": score,
+                "source_ranges": list(sr),
+                "matched_chunk_indices": [hit.get("chunk_index")],
+            }
+        else:
+            if score > float(row.get("semantic_score", 0.0)):
+                row["semantic_score"] = score
+
+            cidx = hit.get("chunk_index")
+            if cidx is not None:
+                row["matched_chunk_indices"].append(cidx)
+
+            row["source_ranges"].extend(sr)
+
+    out = []
+    for page_idx, row in by_page.items():
+        page_text = data_loader.chunks[page_idx] if 0 <= page_idx < len(data_loader.chunks) else ""
+        merged = _sanitize_source_ranges(row.get("source_ranges", []), text_len=len(page_text))
+        row["source_ranges"] = merged
+
+        uniq = []
+        seen = set()
+        for x in row.get("matched_chunk_indices", []):
+            try:
+                xi = int(x)
+            except Exception:
+                continue
+            if xi not in seen:
+                seen.add(xi)
+                uniq.append(xi)
+        row["matched_chunk_indices"] = uniq
+
+        out.append(row)
+
+    out.sort(key=lambda x: float(x.get("semantic_score", 0.0)), reverse=True)
+    return out
+
+
+def _build_semantic_items_from_pages(page_hits):
+    out = []
+
+    for hit in page_hits:
+        page_idx = _coerce_opt_int(hit.get("page_index"), default=None)
+        if page_idx is None or not (0 <= page_idx < len(data_loader.chunks)):
+            continue
+
+        out.append(
+            _build_item(
+                page_idx,
+                source_ranges=hit.get("source_ranges", []),
+                semantic_score=hit.get("semantic_score", 0.0),
+                matched_chunk_indices=hit.get("matched_chunk_indices", []),
+            )
+        )
+
+    return out
+
+
+def _filters_from_json(data: dict):
+    """
+    Legal filter contract.
+
+    Supported:
+      - mandatoryKeywords
+      - filename
+      - subjects
+      - signatures
+      - doctype
+      - lawnumber
+      - date / date_from / date_to / dateFrom / dateTo
+
+    Backward-compatible pass-throughs:
+      - topics
+      - bookName
+    """
+    filters = {
+        "isSemanticSearch": _to_bool(data.get("isSemanticSearch", False)),
+        "mandatoryKeywords": data.get("mandatoryKeywords") or [],
+        "filename": data.get("filename"),
+        "subjects": data.get("subjects") if data.get("subjects") is not None else (data.get("topics") or []),
+        "signatures": data.get("signatures"),
+        "doctype": data.get("doctype"),
+        "lawnumber": data.get("lawnumber"),
+    }
+
+    date_obj = data.get("date")
+    if isinstance(date_obj, dict):
+        date_from = date_obj.get("from")
+        date_to = date_obj.get("to")
+    else:
+        date_from = data.get("date_from", data.get("dateFrom"))
+        date_to = data.get("date_to", data.get("dateTo"))
+
+    if date_obj is not None:
+        filters["date"] = date_obj
+    if date_from is not None:
+        filters["date_from"] = date_from
+    if date_to is not None:
+        filters["date_to"] = date_to
+
+    # backward-compatible alias
+    if filters["filename"] is None and data.get("bookName") is not None:
+        filters["filename"] = data.get("bookName")
+
+    return filters
+
+
+def _has_active_filters(filters: dict):
+    return any(
+        [
+            bool(filters.get("mandatoryKeywords")),
+            bool(filters.get("filename")),
+            bool(filters.get("subjects")),
+            bool(filters.get("signatures")),
+            bool(filters.get("doctype")),
+            bool(filters.get("lawnumber")),
+            bool(filters.get("date")),
+            bool(filters.get("date_from")),
+            bool(filters.get("date_to")),
+        ]
+    )
+
+
+def _compute_all_result_indices(data: dict):
+    """
+    Same logic as /search-with-filters, but returns ALL results (no pagination).
+
+    Semantic export returns PAGE indices aligned with data_loader.
+    """
+    filters = _filters_from_json(data)
+    queries = _parse_queries_from_json(data, is_semantic=filters.get("isSemanticSearch", False))
+
+    if not queries and not _has_active_filters(filters):
+        return [], [], filters
+
+    valid_indices = get_valid_indices(filters)
+
+    if queries:
+        if filters.get("isSemanticSearch", False):
+            semantic_query = queries[0]
+            chunk_hits, expanded_queries = _run_semantic_search(semantic_query, valid_indices)
+            page_hits = _aggregate_chunk_hits_to_pages(chunk_hits)
+
+            result_indices = []
+            for hit in page_hits:
+                pidx = _coerce_opt_int(hit.get("page_index"))
+                if pidx is not None:
+                    result_indices.append(pidx)
+
+            return result_indices, expanded_queries, filters
+
+        query_payload = queries if len(queries) > 1 else queries[0]
+        result_indices, expanded_queries = search_fuzzy(query_payload, valid_indices)
+        return result_indices, expanded_queries, filters
+
+    result_indices = list(valid_indices)
+    result_indices.sort()
+    return result_indices, [], filters
+
+
+def _safe_filename_part(s: str, fallback="export"):
+    s = (s or "").strip()
+    if not s:
+        return fallback
+    s = re.sub(r"[^\w\u0600-\u06FF\s\-]+", "", s, flags=re.UNICODE)
+    s = re.sub(r"\s+", "_", s).strip("_")
+    return s[:80] if s else fallback
+
+
+def _page_sort_key(p):
+    try:
+        return (0, int(p))
+    except Exception:
+        return (1, str(p or ""))
+
+
+def _safe_abs_from_rel(rel_path: str) -> Path:
+    """
+    Prevent path traversal. Ensure resolved path stays inside documents_root_dir().
+    """
+    rel_path = (rel_path or "").replace("\\", "/").lstrip("/")
+    root = data_loader.documents_root_dir().resolve()
+    abs_path = (root / rel_path).resolve()
+    if root not in abs_path.parents and abs_path != root:
+        raise ValueError("Unsafe path")
+    return abs_path
+
+
+def _dummy_upload_root() -> Path:
+    root = data_loader.documents_root_dir().resolve().parent / "books_pdf"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _create_dummy_job(saved_files, rejected):
+    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    job_id = f"dummy-{ts}"
+    snap = {
+        "job_id": job_id,
+        "status": "completed",
+        "stage": "disabled",
+        "progress": 100,
+        "message": "Upload accepted. Ingestion is disabled for now; no processing was executed.",
+        "docs": saved_files,
+        "rejected": rejected,
+        "started_at": datetime.utcnow().isoformat() + "Z",
+        "finished_at": datetime.utcnow().isoformat() + "Z",
+    }
+    _DUMMY_ADMIN_JOBS[job_id] = snap
+    return snap
+
+
+def _dummy_sse_generator(job_id):
+    snap = _DUMMY_ADMIN_JOBS.get(job_id)
+    if not snap:
+        yield 'event: error\ndata: {"error":"job not found"}\n\n'
+        return
+
+    payload = jsonify(snap).get_data(as_text=True)
+    yield f"event: progress\ndata: {payload}\n\n"
+    yield f"event: done\ndata: {payload}\n\n"
+
+
+@main_bp.route("/", methods=["GET"])
+def status():
+    return jsonify(
+        {
+            "status": "ok",
+            "chunks_loaded": len(data_loader.chunks),
+            "documents_loaded": len({p for p in data_loader.paths if p}),
+            "data_version": getattr(data_loader, "DATA_VERSION", None),
+        }
+    )
+
+
+@main_bp.route("/search-advanced", methods=["GET"])
+def searchadvanced():
+    t0 = time.time()
+
+    is_semantic = _to_bool(
+        request.args.get("isSemanticSearch", request.args.get("semantic", False))
+    )
+
+    queries = _parse_queries_from_args(request.args, is_semantic=is_semantic)
+    if not queries:
+        return jsonify({"error": "Missing query"}), 400
+
+    page = _clamp_int(request.args.get("page", 1), default=1, min_v=1)
+    page_size = _clamp_int(request.args.get("page_size", 30), default=30, min_v=1, max_v=200)
+
+    valid_indices = list(range(len(data_loader.chunks)))
+
+    if is_semantic:
+        try:
+            semantic_query = queries[0]
+            chunk_hits, expanded_queries = _run_semantic_search(semantic_query, valid_indices)
+
+            page_hits = _aggregate_chunk_hits_to_pages(chunk_hits)
+            total_unique_pages = len(page_hits)
+
+            page_hits_page, page_meta = _paginate(page_hits, page, page_size)
+
+            page_meta["total_results"] = total_unique_pages
+            page_meta["total_pages"] = max(1, math.ceil(total_unique_pages / page_size)) if total_unique_pages else 0
+            page_meta["has_prev"] = page_meta["page"] > 1
+            page_meta["has_next"] = page_meta["page"] < page_meta["total_pages"]
+
+            payload = {
+                "results": _build_semantic_items_from_pages(page_hits_page),
+                "expanded_queries": expanded_queries,
+                "original_query": semantic_query,
+                "original_queries": [semantic_query],
+                "endpoint": "search-advanced",
+                "isSemanticSearch": True,
+                **page_meta,
+                "server_seconds": round(time.time() - t0, 3),
+            }
+            return jsonify(payload)
+
+        except Exception as e:
+            return jsonify({"error": f"Semantic search failed: {e}"}), 500
+
+    query_payload = queries if len(queries) > 1 else queries[0]
+    result_indices, expanded_queries = search_fuzzy(query_payload, valid_indices)
+
+    page_indices, page_meta = _paginate(result_indices, page, page_size)
+
+    payload = {
+        "results": _build_items(page_indices),
+        "expanded_queries": expanded_queries,
+        "original_query": " OR ".join(queries),
+        "original_queries": queries,
+        "endpoint": "search-advanced",
+        "isSemanticSearch": False,
+        **page_meta,
+        "server_seconds": round(time.time() - t0, 3),
+    }
+    return jsonify(payload)
+
+
+@main_bp.route("/search-with-filters", methods=["POST"])
+def searchwithfilters():
+    t0 = time.time()
+
+    data = request.get_json(silent=True) or {}
+    filters = _filters_from_json(data)
+    queries = _parse_queries_from_json(data, is_semantic=filters["isSemanticSearch"])
+
+    page = _clamp_int(data.get("page", 1), default=1, min_v=1)
+    page_size = _clamp_int(data.get("page_size", 30), default=30, min_v=1, max_v=200)
+
+    if not queries and not _has_active_filters(filters):
+        return jsonify({"error": "Missing query or filters"}), 400
+
+    valid_indices = get_valid_indices(filters)
+
+    if queries and filters["isSemanticSearch"]:
+        try:
+            semantic_query = queries[0]
+            chunk_hits, expanded_queries = _run_semantic_search(semantic_query, valid_indices)
+
+            page_hits = _aggregate_chunk_hits_to_pages(chunk_hits)
+            total_unique_pages = len(page_hits)
+
+            page_hits_page, page_meta = _paginate(page_hits, page, page_size)
+
+            page_meta["total_results"] = total_unique_pages
+            page_meta["total_pages"] = max(1, math.ceil(total_unique_pages / page_size)) if total_unique_pages else 0
+            page_meta["has_prev"] = page_meta["page"] > 1
+            page_meta["has_next"] = page_meta["page"] < page_meta["total_pages"]
+
+            payload = {
+                "results": _build_semantic_items_from_pages(page_hits_page),
+                "expanded_queries": expanded_queries,
+                "original_query": semantic_query,
+                "original_queries": [semantic_query],
+                "endpoint": "search-with-filters",
+                "valid_after_filters": len(valid_indices),
+                "filters": filters,
+                "isSemanticSearch": True,
+                **page_meta,
+                "server_seconds": round(time.time() - t0, 3),
+            }
+            return jsonify(payload)
+
+        except Exception as e:
+            return jsonify({"error": f"Semantic search failed: {e}"}), 500
+
+    if queries:
+        query_payload = queries if len(queries) > 1 else queries[0]
+        result_indices, expanded_queries = search_fuzzy(query_payload, valid_indices)
+        original_query = " OR ".join(queries)
+        original_queries = queries
+    else:
+        result_indices = list(valid_indices)
+        result_indices.sort()
+        expanded_queries = []
+        original_query = ""
+        original_queries = []
+
+    page_indices, page_meta = _paginate(result_indices, page, page_size)
+
+    payload = {
+        "results": _build_items(page_indices),
+        "expanded_queries": expanded_queries,
+        "original_query": original_query,
+        "original_queries": original_queries,
+        "endpoint": "search-with-filters",
+        "valid_after_filters": len(valid_indices),
+        "filters": filters,
+        "isSemanticSearch": False,
+        **page_meta,
+        "server_seconds": round(time.time() - t0, 3),
+    }
+    return jsonify(payload)
+
+
+@main_bp.route("/chunk/<int:chunk_id>", methods=["GET"])
+def get_chunk(chunk_id):
+    if chunk_id < 0 or chunk_id >= len(data_loader.chunks):
+        return jsonify({"error": "Chunk ID not found"}), 404
+    return jsonify(_build_item(chunk_id))
+
+
+@main_bp.route("/file/<path:rel_path>", methods=["GET"])
+def serve_file(rel_path):
+    try:
+        abs_path = _safe_abs_from_rel(rel_path)
+    except Exception:
+        return jsonify({"error": "Unsafe path"}), 400
+
+    if not abs_path.exists():
+        return jsonify({"error": "File not found"}), 404
+
+    return send_file(str(abs_path), as_attachment=False)
+
+
+@main_bp.route("/open/<int:chunk_id>", methods=["GET"])
+def open_document(chunk_id):
+    """
+    PDF-only opening logic for legal documents.
+    """
+    if chunk_id < 0 or chunk_id >= len(data_loader.chunks):
+        return jsonify({"error": "Invalid chunk ID"}), 404
+
+    rel_path = data_loader.paths[chunk_id]
+    page_number = data_loader.page_numbers[chunk_id]
+
+    if not rel_path:
+        return jsonify({"error": "Missing path for this chunk"}), 400
+        
+    if not Path(rel_path).suffix:
+        rel_path = f"{rel_path}.pdf"
+
+    try:
+        abs_path = _safe_abs_from_rel(rel_path)
+    except Exception:
+        return jsonify({"error": "Unsafe path"}), 400
+
+    if not abs_path.exists():
+        return jsonify({"error": "File not found", "expected_path": str(abs_path)}), 404
+
+    if abs_path.suffix.lower() != ".pdf":
+        return jsonify({"error": "Only PDF documents are supported"}), 400
+
+    file_url = url_for("main.serve_file", rel_path=rel_path.replace("\\", "/"), _external=True)
+
+    return jsonify(
+        {
+            "type": "pdf",
+            "file_url": file_url,
+            "page": page_number,
+            "filename": data_loader.filenames[chunk_id],
+            "doctype": data_loader.doctypes[chunk_id],
+            "lawnumber": data_loader.lawnumbers[chunk_id],
+            "date": data_loader.dates[chunk_id],
+            "path": rel_path,
+        }
+    )
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+
+@main_bp.route("/export/full", methods=["POST"])
+def export_full():
+    """
+    TXT export grouped by filename, including legal metadata.
+    """
+    data = request.get_json(silent=True) or {}
+    indices, expanded, filters = _compute_all_result_indices(data)
+
+    doc_map = defaultdict(list)
+    doc_meta = {}
+
+    for i in indices:
+        filename = data_loader.filenames[i] or "document"
+        page_number = data_loader.page_numbers[i]
+        txt = (data_loader.chunks[i] or "").strip()
+
+        doc_map[filename].append((page_number, txt))
+
+        if filename not in doc_meta:
+            doc_meta[filename] = {
+                "doctype": data_loader.doctypes[i] or "",
+                "lawnumber": data_loader.lawnumbers[i] or "",
+                "date": data_loader.dates[i] or "",
+                "subjects": data_loader.subjects_list[i] or [],
+                "signatures": data_loader.signatures_list[i] or [],
+                "path": data_loader.paths[i] or "",
+            }
+
+    docs_sorted = sorted(doc_map.keys(), key=lambda x: str(x or "").lower())
+
+    lines = []
+    qs = _parse_queries_from_json(data, is_semantic=_to_bool(data.get("isSemanticSearch", False)))
+    header = " / ".join(qs) if qs else "بدون كلمات بحث"
+
+    lines.append("FULL EXPORT")
+    lines.append(f"QUERY: {header}")
+    lines.append(f"TOTAL RESULTS: {len(indices)}")
+    lines.append("")
+
+    for filename in docs_sorted:
+        meta = doc_meta.get(filename, {})
+        lines.append(f"FILENAME: {filename}")
+        lines.append(f"DOCTYPE: {meta.get('doctype', '')}")
+        lines.append(f"LAWNUMBER: {meta.get('lawnumber', '')}")
+        lines.append(f"DATE: {meta.get('date', '')}")
+        lines.append(f"SUBJECTS: {', '.join(meta.get('subjects', []))}")
+        lines.append(f"SIGNATURES: {', '.join(meta.get('signatures', []))}")
+        lines.append(f"PATH: {meta.get('path', '')}")
+        lines.append("")
+
+        items = sorted(doc_map[filename], key=lambda x: _page_sort_key(x[0]))
+
+        for page_number, txt in items:
+            lines.append(f"PAGE: {page_number if page_number is not None else '-'}")
+            lines.append(txt)
+            lines.append("---")
+            lines.append("")
+
+        lines.append("######")
+        lines.append("")
+
+    content = "\n".join(lines).encode("utf-8")
+    bio = io.BytesIO(content)
+    bio.seek(0)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name_part = _safe_filename_part(" / ".join(qs), fallback="نتائج")
+    filename = f"full_export_{name_part}_{ts}.txt"
+
+    return send_file(
+        bio,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="text/plain; charset=utf-8",
+    )
+
+
+# ============================================================
+# ADMIN - dummy PDF upload only
+# ============================================================
+
+ALLOWED_ADMIN_EXT = {".pdf"}
+
+
+@main_bp.route("/admin/status", methods=["GET"])
+def admin_status():
+    return jsonify(
+        {
+            "status": "ok",
+            "message": "Admin endpoints are active. Ingestion is disabled; PDF upload is accepted in dummy mode only.",
+            "chunks_loaded": len(data_loader.chunks),
+            "documents_loaded": len({p for p in data_loader.paths if p}),
+            "data_version": getattr(data_loader, "DATA_VERSION", None),
+        }
+    )
+
+
+@main_bp.route("/admin/process", methods=["POST"])
+def admin_process():
+    """
+    Dummy upload endpoint:
+      - accepts PDF files only
+      - saves them in a dummy upload folder
+      - does NOT trigger OCR, ingestion, corpus merge, or embedding updates
+      - returns an immediately completed fake job_id for frontend compatibility
+    """
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"error": "No files uploaded. Use field name 'files'."}), 400
+
+    usable = []
+    rejected = []
+
+    for f in files:
+        name = (f.filename or "").strip()
+        if not name:
+            rejected.append({"name": "", "reason": "empty filename"})
+            continue
+
+        ext = Path(name).suffix.lower()
+        if ext not in ALLOWED_ADMIN_EXT:
+            rejected.append({"name": name, "reason": f"unsupported extension: {ext} (only .pdf)"})
+            continue
+
+        usable.append(f)
+
+    if not usable:
+        return jsonify(
+            {
+                "status": "error",
+                "message": "No valid files accepted.",
+                "rejected": rejected,
+            }
+        ), 400
+
+    saved_files = []
+    upload_root = _dummy_upload_root()
+    timestamp_prefix = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+
+    for idx, f in enumerate(usable, start=1):
+        original_name = (f.filename or "").strip()
+        safe_name = secure_filename(original_name) or f"upload_{idx}.pdf"
+        final_name = f"{timestamp_prefix}_{idx}_{safe_name}"
+        save_path = upload_root / final_name
+        f.save(str(save_path))
+
+        saved_files.append(
+            {
+                "original_name": original_name,
+                "stored_name": final_name,
+                "stored_path": str(save_path),
+                "size_bytes": save_path.stat().st_size if save_path.exists() else None,
+            }
+        )
+
+    snap = _create_dummy_job(saved_files=saved_files, rejected=rejected)
+
+    return jsonify(
+        {
+            "status": "ok",
+            "message": "Upload accepted. Ingestion is disabled for now; no processing was executed.",
+            "job_id": snap["job_id"],
+            "docs": saved_files,
+            "rejected": rejected,
+        }
+    )
+
+
+@main_bp.route("/admin/progress/<job_id>", methods=["GET"])
+def admin_progress(job_id):
+    """
+    Dummy SSE endpoint for compatibility with existing frontend flow.
+    """
+    headers = {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Access-Control-Allow-Origin": "*",
+    }
+    return Response(stream_with_context(_dummy_sse_generator(job_id)), headers=headers)
+
+
+@main_bp.route("/admin/job/<job_id>", methods=["GET"])
+def admin_job(job_id):
+    snap = _DUMMY_ADMIN_JOBS.get(job_id)
+    if not snap:
+        return jsonify({"error": "job not found"}), 404
+    return jsonify(snap)
+
+
+# ============================================================
+# FILTER OPTIONS
+# ============================================================
+
+@main_bp.route("/filters/options", methods=["GET"])
+def filters_options():
+    try:
+        opts = get_filter_options()
+        return jsonify(
+            {
+                **opts,
+                "data_version": getattr(data_loader, "DATA_VERSION", None),
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@main_bp.route("/filters/books", methods=["GET"])
+def filters_books():
+    """
+    Backward-compatible alias.
+    Returns legal filenames under the historical route.
+    """
+    try:
+        opts = get_filter_options()
+        books = opts.get("filenames", [])
+        return jsonify(
+            {
+                "books": books,
+                "count": len(books),
+                "data_version": getattr(data_loader, "DATA_VERSION", None),
+                "deprecated": True,
+                "replacement": "/filters/options",
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================
+# ADMIN DOCUMENT SUMMARY / UPDATE
+# ============================================================
+
+@main_bp.route("/admin/documents/summary", methods=["GET"])
+def admin_documents_summary():
+    try:
+        return jsonify({"status": "ok", **data_loader.compute_documents_summary()})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@main_bp.route("/admin/documents/update", methods=["POST"])
+def admin_documents_update():
+    """
+    Body:
+      {
+        "filename": "...",
+        "doctype": "...",        # optional
+        "lawnumber": "...",      # optional
+        "date": "...",           # optional
+        "subjects": [...],       # optional
+        "signatures": [...],     # optional
+        "path": "..."            # optional
+      }
+
+    Updates all rows belonging to the same filename.
+    """
+    data = request.get_json(silent=True) or {}
+
+    filename = (data.get("filename") or "").strip()
+    if not filename:
+        return jsonify({"status": "error", "message": "filename is required"}), 400
+
+    doctype = data.get("doctype", None)
+    lawnumber = data.get("lawnumber", None)
+    date_val = data.get("date", None)
+    subjects = data.get("subjects", None)
+    signatures = data.get("signatures", None)
+    path_val = data.get("path", None)
+
+    if doctype is not None and len(str(doctype)) > 250:
+        return jsonify({"status": "error", "message": "doctype is too long"}), 400
+    if lawnumber is not None and len(str(lawnumber)) > 250:
+        return jsonify({"status": "error", "message": "lawnumber is too long"}), 400
+    if date_val is not None and len(str(date_val)) > 120:
+        return jsonify({"status": "error", "message": "date is too long"}), 400
+    if path_val is not None and len(str(path_val)) > 1000:
+        return jsonify({"status": "error", "message": "path is too long"}), 400
+
+    try:
+        res = data_loader.update_document_metadata(
+            filename=filename,
+            new_doctype=doctype,
+            new_lawnumber=lawnumber,
+            new_date=date_val,
+            new_subjects=subjects,
+            new_signatures=signatures,
+            new_path=path_val,
+        )
+        return jsonify({"status": "ok", **res})
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ============================================================
+# DEPRECATED BOOK ADMIN ALIASES
+# ============================================================
+
+@main_bp.route("/admin/books/summary", methods=["GET"])
+def admin_books_summary():
+    """
+    Deprecated compatibility route.
+    Returns the new document summary payload shape.
+    """
+    try:
+        return jsonify(
+            {
+                "status": "ok",
+                "deprecated": True,
+                "replacement": "/admin/documents/summary",
+                **data_loader.compute_documents_summary(),
+            }
+        )
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@main_bp.route("/admin/books/update", methods=["POST"])
+def admin_books_update():
+    """
+    Deprecated compatibility route.
+    Accepts old 'book_name' key and maps it to filename.
+    """
+    data = request.get_json(silent=True) or {}
+
+    filename = (data.get("filename") or data.get("book_name") or "").strip()
+    if not filename:
+        return jsonify({"status": "error", "message": "filename (or book_name) is required"}), 400
+
+    doctype = data.get("doctype", data.get("category"))
+    lawnumber = data.get("lawnumber")
+    date_val = data.get("date")
+    subjects = data.get("subjects")
+    signatures = data.get("signatures")
+    path_val = data.get("path")
+
+    try:
+        res = data_loader.update_document_metadata(
+            filename=filename,
+            new_doctype=doctype,
+            new_lawnumber=lawnumber,
+            new_date=date_val,
+            new_subjects=subjects,
+            new_signatures=signatures,
+            new_path=path_val,
+        )
+        return jsonify(
+            {
+                "status": "ok",
+                "deprecated": True,
+                "replacement": "/admin/documents/update",
+                **res,
+            }
+        )
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+######
+
+C:\Users\Abderrahman\Desktop\new_legal_ai\backend_BO\app\semantic_engine.py
+
+from __future__ import annotations
+
+import logging
+import pickle
+import re
+from pathlib import Path
+from functools import lru_cache
+from typing import Any, Dict, List, Tuple, Optional
+
+import numpy as np
+import faiss
+from sentence_transformers import SentenceTransformer
+import hashlib
+from collections import OrderedDict
+# Works whether semantic_engine.py is imported as package module or script-level module
+try:
+    from . import data_loader
+except Exception:
+    import data_loader  # type: ignore
+
+logger = logging.getLogger(__name__)
+
+# -------------------------------------------------------------------
+# Arabic normalization (matches your notebook logic)
+# -------------------------------------------------------------------
+_DIACRITICS_LIST = ['ً', 'ٌ', 'ٍ', 'َ', 'ُ', 'ِ', 'ّ', 'ْ']
+_TATWEEL = 'ـ'
+
+
+def undiacritize(original_text: str) -> str:
+    text = "" if original_text is None else str(original_text)
+
+    for haraka in _DIACRITICS_LIST:
+        text = text.replace(haraka, "")
+
+    text = text.replace(_TATWEEL, "")
+
+    # Replace successive spaces with a single space
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+
+def _as_f32(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x)
+    if x.dtype != np.float32:
+        x = x.astype(np.float32)
+    return np.ascontiguousarray(x)
+
+
+def _choose_device(device: str) -> str:
+    """
+    Returns 'cuda' or 'cpu' (SentenceTransformer-friendly).
+    """
+    if device and device != "auto":
+        return device
+    try:
+        import torch
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        return "cpu"
+
+
+def _normalize_rel_path(p: str) -> str:
+    """
+    Keep consistent with data_loader path semantics.
+    """
+    if not p:
+        return ""
+    s = str(p).strip().replace("\\", "/")
+    s = s.lstrip("/")
+    return s
+
+
+def _merge_ranges(ranges: list[tuple[int, int]], join_if_gap_leq: int = 2) -> list[tuple[int, int]]:
+    """
+    Merge overlapping / adjacent source ranges.
+    Example: [(0,97), (99,250)] becomes one range if small gap allowed.
+    """
+    clean: list[tuple[int, int]] = []
+    for r in ranges or []:
+        if not r or len(r) != 2:
+            continue
+        a, b = r
+        if a is None or b is None:
+            continue
+        try:
+            a = int(a)
+            b = int(b)
+        except Exception:
+            continue
+        if b < a:
+            a, b = b, a
+        clean.append((a, b))
+
+    if not clean:
+        return []
+
+    clean.sort(key=lambda x: (x[0], x[1]))
+    merged = [clean[0]]
+
+    for a, b in clean[1:]:
+        la, lb = merged[-1]
+        if a <= lb + 1 + join_if_gap_leq:
+            merged[-1] = (la, max(lb, b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+# -------------------------------------------------------------------
+# Hybrid retrieval helpers (ported from your notebook, same behavior)
+# -------------------------------------------------------------------
+def scale_scores(values, method="minmax", eps=1e-12):
+    v = np.asarray(values, dtype=np.float32)
+    if v.size == 0:
+        return v
+    if method == "minmax":
+        vmin, vmax = float(v.min()), float(v.max())
+        if abs(vmax - vmin) < eps:
+            return np.ones_like(v, dtype=np.float32)
+        return (v - vmin) / (vmax - vmin)
+    elif method == "zsigmoid":
+        mu, sd = float(v.mean()), float(v.std())
+        if sd < eps:
+            return np.ones_like(v, dtype=np.float32)
+        z = (v - mu) / sd
+        return 1.0 / (1.0 + np.exp(-z))
+    else:
+        raise ValueError("scale method must be one of: 'minmax', 'zsigmoid'")
+
+
+def _build_scaled_maps(idx_to_rawscore, method="minmax"):
+    """Return idx->scaled_score computed over the provided set only."""
+    idxs = list(idx_to_rawscore.keys())
+    raws = [idx_to_rawscore[i] for i in idxs]
+    scaled = scale_scores(raws, method=method)
+    return {i: float(s) for i, s in zip(idxs, scaled)}
+
+
+def _rank_percentiles(idx_to_rawscore_desc):
+    """
+    Given idx->rawscore, produce idx->percentile based on rank among its own list.
+    Best item ~ 1.0, worst ~ 0.0 (or 1.0 if only one).
+    """
+    items = sorted(idx_to_rawscore_desc.items(), key=lambda x: x[1], reverse=True)
+    n = len(items)
+    out = {}
+    if n == 0:
+        return out
+    if n == 1:
+        out[items[0][0]] = 1.0
+        return out
+    for r, (idx_, _) in enumerate(items):
+        out[idx_] = 1.0 - (r / (n - 1))
+    return out
+
+
+def _quantile_from_scaled_distribution(scaled_values_sorted, q):
+    """
+    scaled_values_sorted: sorted list of scaled scores (ascending)
+    q in [0,1]
+    returns approximate quantile value.
+    """
+    if len(scaled_values_sorted) == 0:
+        return 0.0
+    q = float(np.clip(q, 0.0, 1.0))
+    pos = q * (len(scaled_values_sorted) - 1)
+    lo = int(np.floor(pos))
+    hi = int(np.ceil(pos))
+    if lo == hi:
+        return float(scaled_values_sorted[lo])
+    w = pos - lo
+    return float((1 - w) * scaled_values_sorted[lo] + w * scaled_values_sorted[hi])
+
+
+class SemanticEngine:
+    """
+    Semantic retrieval using precomputed embeddings + FAISS.
+
+    ✅ Uses your WORKING hybrid Jina+E5 approach:
+      - FAISS IndexFlatIP (cosine-like on normalized vectors)
+      - query normalization (undiacritize)
+      - per-model auto-tuned thresholds for stable #hits
+      - two-stage hybrid ranking:
+          1) COMMON hits (both models) first
+          2) SINGLE hits next (no unfair penalty; "imagined score" via rank-quantiles)
+
+    ✅ CRITICAL FIX (your notebook mapping):
+      - page_index from chunks_tobe_embedded is used to fetch the REAL PAGE metadata
+        (path/book/page numbers/author...) from data_loader arrays loaded from books_chunks.pickle
+        just like: pages[chunks[idx]['page_index']]
+    """
+
+    _DEFAULT_JINA_KWARGS = dict(
+        start_threshold=0.553,
+        min_hits=7,
+        max_hits=25,
+        step=0.01,
+        min_threshold=0.44,
+        max_threshold=1.0,
+        max_iters=500,
+        max_results=None,
+        verbose=False,
+    )
+
+    _DEFAULT_E5_KWARGS = dict(
+        start_threshold=0.8,
+        min_hits=7,
+        max_hits=25,
+        step=0.002,
+        min_threshold=0.7,
+        max_threshold=1.0,
+        max_iters=500,
+        max_results=None,
+        verbose=False,
+    )
+
+    def __init__(self, settings: Any | None = None, *, device: str | None = None, jina_model: str | None = None):
+        self.settings = settings
+
+        settings_device = getattr(settings, "device", "auto") if settings is not None else "auto"
+        self.device = _choose_device(device or settings_device)
+
+        settings_jina_model = getattr(settings, "jina_model", None) if settings is not None else None
+        self.jina_model = (
+            jina_model
+            or settings_jina_model
+            or r"C:\Users\Abderrahman\Desktop\models\jina-embeddings-v3"
+        )
+
+        self.index_jina: Optional[faiss.Index] = None
+        self.index_e5: Optional[faiss.Index] = None
+
+        self.jina: Optional[SentenceTransformer] = None
+        self.e5: Optional[SentenceTransformer] = None
+
+        self.emb_jina: Optional[np.ndarray] = None
+        self.emb_e5: Optional[np.ndarray] = None
+
+        # semantic chunks list
+        self.chunks: list[dict[str, Any]] | None = None
+
+        self._loaded = False
+        self._loaded_data_version = None  # for safe auto-reload if ingestion updates DATA_VERSION
+        # Cache subset indices so repeated filtered searches don't rebuild every time
+        self._subset_index_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+        self._subset_index_cache_max = 16
+
+    # ---------------- pickle/path helpers ----------------
+    def _find_existing(self, candidates: list[Path], label: str) -> Path:
+        for p in candidates:
+            if p.exists():
+                return p
+        raise FileNotFoundError(f"Missing {label}. Tried:\n" + "\n".join(str(p) for p in candidates))
+
+    @staticmethod
+    def _load_pickle(path: Path):
+        if not path.exists():
+            raise FileNotFoundError(f"Missing pickle file: {path}")
+        with path.open("rb") as f:
+            return pickle.load(f)
+
+    def _resolve_embeddings_paths(self) -> tuple[Path, Path]:
+        """
+        Resolve E5 + Jina embedding pickles (BGE optional).
+        """
+        if hasattr(data_loader, "semantic_embeddings_pickle_paths_optional"):
+            d = data_loader.semantic_embeddings_pickle_paths_optional()
+            return Path(d["e5"]), Path(d["jinav3"])
+
+        emb_dir = Path(data_loader.embeddings_dir()) if hasattr(data_loader, "embeddings_dir") else (Path(data_loader._app_root()) / "data" / "embeddings")
+        e5 = self._find_existing([emb_dir / "embeddings_e5_FULL.pickle", emb_dir / "embeddings_e5.pickle"], "E5 embeddings")
+        jina = self._find_existing([emb_dir / "embeddings_jinav3_FULL.pickle", emb_dir / "embeddings_jina_FULL.pickle", emb_dir / "embeddings_jina.pickle"], "Jina embeddings")
+        return e5, jina
+
+    def _resolve_chunks_path(self) -> Path:
+        explicit = getattr(self.settings, "chunks_pickle_path", None) if self.settings is not None else None
+        if explicit:
+            p = Path(explicit)
+            if p.exists():
+                return p
+
+        if hasattr(data_loader, "semantic_chunks_pickle_path"):
+            return Path(data_loader.semantic_chunks_pickle_path())
+
+        return self._find_existing([Path(data_loader._app_root()) / "data" / "chunks_tobe_embedded.pickle"], "chunks_tobe_embedded.pickle")
+
+    # ---------------- lifecycle ----------------
+    def _reset(self):
+        self.index_jina = None
+        self.index_e5 = None
+        self.jina = None
+        self.e5 = None
+        self.emb_jina = None
+        self.emb_e5 = None
+        self.chunks = None
+        self._loaded = False
+
+        try:
+            self.search.cache_clear()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            self.search_chunk_indices.cache_clear()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    def load(self) -> None:
+        """
+        Lazy load. Auto-reloads if data_loader.DATA_VERSION changed.
+        """
+        current_ver = getattr(data_loader, "DATA_VERSION", None)
+
+        if self._loaded and self._loaded_data_version == current_ver:
+            return
+
+        if self._loaded and self._loaded_data_version != current_ver:
+            logger.info("SemanticEngine reload due to DATA_VERSION change (%s -> %s)", self._loaded_data_version, current_ver)
+            self._reset()
+
+        # ensure pages (books_chunks) are loaded for authoritative mapping
+        # (safe even if already loaded)
+        if hasattr(data_loader, "chunks") and len(getattr(data_loader, "chunks", [])) == 0:
+            try:
+                data_loader.load_chunks()
+            except Exception:
+                # if app loads elsewhere, fine; but semantic mapping needs pages
+                pass
+
+        emb_e5_path, emb_jina_path = self._resolve_embeddings_paths()
+        chunks_path = self._resolve_chunks_path()
+
+        emb_e5 = _as_f32(self._load_pickle(emb_e5_path))
+        emb_jina = _as_f32(self._load_pickle(emb_jina_path))
+
+        if not (emb_e5.ndim == emb_jina.ndim == 2):
+            raise ValueError("Embeddings must be 2D arrays [n_chunks, dim].")
+
+        if emb_e5.shape[0] != emb_jina.shape[0]:
+            raise ValueError(f"Row count mismatch: e5={emb_e5.shape}, jina={emb_jina.shape}")
+
+        # Build FAISS indices (cosine-like via normalized embeddings)
+        self.index_e5 = faiss.IndexFlatIP(emb_e5.shape[1])
+        self.index_e5.add(emb_e5)
+
+        self.index_jina = faiss.IndexFlatIP(emb_jina.shape[1])
+        self.index_jina.add(emb_jina)
+
+        self.emb_e5 = emb_e5
+        self.emb_jina = emb_jina
+
+        self.chunks = self._load_pickle(chunks_path)
+        all_chunks = [x['text'] for x in self.chunks]
+        self.all_chunks = [undiacritize(x) for x in all_chunks]
+        if not isinstance(self.chunks, list):
+            raise TypeError(f"Expected chunks to be a list, got {type(self.chunks)}")
+
+        if len(self.chunks) != emb_e5.shape[0]:
+            raise ValueError(f"Mismatch: len(chunks)={len(self.chunks)} but embeddings rows={emb_e5.shape[0]}")
+
+        # Models
+        self.jina = SentenceTransformer(
+            self.jina_model,
+            trust_remote_code=True,
+            device=self.device,
+        )
+
+        e5_kwargs = {}
+        if str(self.device).startswith("cuda"):
+            e5_kwargs = {"model_kwargs": {"torch_dtype": "float16"}}
+
+        self.e5 = SentenceTransformer(
+            "intfloat/multilingual-e5-large",
+            device=self.device,
+            **e5_kwargs,
+        )
+        
+        
+        # -----------------------------
+        # Warmup to eliminate first-query cold start
+        # (loads kernels / builds internal caches / first forward pass)
+        # -----------------------------
+        
+        '''
+        try:
+            warm_q = "warmup"
+            _ = self.jina.encode(
+                [warm_q],
+                task="retrieval.query",
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            _ = self.e5.encode(
+                [f"query: {warm_q}"],
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+        except Exception as e:
+            # Don't fail startup if warmup fails; just log.
+            logger.warning("SemanticEngine warmup skipped/failed: %s", e)
+        '''
+        
+        self._loaded = True
+        self._loaded_data_version = current_ver
+
+        logger.info(
+            "SemanticEngine loaded (device=%s, n_chunks=%d, dims: e5=%d jina=%d).",
+            self.device,
+            emb_e5.shape[0],
+            emb_e5.shape[1],
+            emb_jina.shape[1],
+        )
+
+    # -------------------------------------------------------------------
+    # Query helpers (same as notebook)
+    # -------------------------------------------------------------------
+    def _get_query_candidates(self, query: str, *, model_name: str, candidate_k: int) -> Tuple[np.ndarray, np.ndarray]:
+        if self.index_jina is None or self.index_e5 is None or self.jina is None or self.e5 is None:
+            raise RuntimeError("Engine not loaded.")
+
+        q = undiacritize(query)
+
+        if model_name == "jina":
+            q_emb = self.jina.encode(
+                [q],
+                task="retrieval.query",
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            q_emb = _as_f32(q_emb)
+            k = min(int(candidate_k), int(self.index_jina.ntotal))
+            D, I = self.index_jina.search(q_emb, k)
+            return D[0], I[0]
+
+        if model_name == "e5":
+            q_emb = self.e5.encode(
+                [f"query: {q}"],
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            q_emb = _as_f32(q_emb)
+            k = min(int(candidate_k), int(self.index_e5.ntotal))
+            D, I = self.index_e5.search(q_emb, k)
+            return D[0], I[0]
+
+        raise ValueError("model_name must be 'jina' or 'e5'")
+
+    @staticmethod
+    def _filter_hits_by_threshold(scores, ids, threshold: float, max_results=None):
+        hits = []
+        for score, idx_ in zip(scores, ids):
+            if int(idx_) == -1:
+                continue
+            if float(score) >= float(threshold):
+                hits.append((float(score), int(idx_)))
+        if max_results is not None:
+            hits = hits[:max_results]
+        return hits
+
+    def _auto_tune_threshold_for_query(
+        self,
+        query: str,
+        *,
+        model_name: str,
+        start_threshold: float,
+        min_hits: int,
+        max_hits: int,
+        candidate_k: int,
+        step: float,
+        min_threshold: float,
+        max_threshold: float,
+        max_iters: int,
+        max_results=None,
+        verbose: bool = False,
+    ) -> Tuple[float, List[Tuple[float, int]]]:
+        scores, ids = self._get_query_candidates(query, model_name=model_name, candidate_k=candidate_k)
+
+        thr = float(start_threshold)
+        best_thr = thr
+        best_hits = self._filter_hits_by_threshold(scores, ids, thr, max_results=max_results)
+        best_count = len(best_hits)
+
+        if min_hits <= best_count <= max_hits:
+            return thr, best_hits
+
+        visited = set()
+
+        for _it in range(int(max_iters)):
+            key = round(thr, 6)
+            if key in visited:
+                break
+            visited.add(key)
+
+            count = len(self._filter_hits_by_threshold(scores, ids, thr, max_results=None))
+
+            if count < min_hits:
+                dist = min_hits - count
+            elif count > max_hits:
+                dist = count - max_hits
+            else:
+                dist = 0
+
+            if best_count < min_hits:
+                best_dist = min_hits - best_count
+            elif best_count > max_hits:
+                best_dist = best_count - max_hits
+            else:
+                best_dist = 0
+
+            if dist < best_dist:
+                best_thr = thr
+                best_count = count
+                best_hits = self._filter_hits_by_threshold(scores, ids, thr, max_results=max_results)
+
+            if min_hits <= count <= max_hits:
+                final_hits = self._filter_hits_by_threshold(scores, ids, thr, max_results=max_results)
+                return thr, final_hits
+
+            if count < min_hits:
+                thr -= float(step)
+            else:
+                thr += float(step)
+
+            thr = max(float(min_threshold), min(float(max_threshold), thr))
+
+            if thr in (float(min_threshold), float(max_threshold)):
+                break
+
+        return best_thr, best_hits
+
+    def _run_model_retrieval_autotuned(
+        self,
+        query: str,
+        *,
+        model_name: str,
+        tuned_kwargs: dict,
+    ) -> Tuple[float, Dict[int, float]]:
+        thr, hits = self._auto_tune_threshold_for_query(query, model_name=model_name, **tuned_kwargs)
+
+        out: Dict[int, float] = {}
+        for score, idx_ in hits:
+            if idx_ not in out or score > out[idx_]:
+                out[idx_] = float(score)
+        return thr, out
+
+    def _hybrid_two_stage_rank(
+        self,
+        query: str,
+        *,
+        jina_kwargs: dict,
+        e5_kwargs: dict,
+        scale_method: str = "minmax",
+        top_n_common=None,
+        top_n_single=None,
+        print_debug: bool = False,
+    ) -> List[Dict[str, Any]]:
+        thr_j, jina_map = self._run_model_retrieval_autotuned(query, model_name="jina", tuned_kwargs=jina_kwargs)
+        thr_e, e5_map = self._run_model_retrieval_autotuned(query, model_name="e5", tuned_kwargs=e5_kwargs)
+
+        set_j, set_e = set(jina_map.keys()), set(e5_map.keys())
+        common = set_j & set_e
+        only_j = set_j - set_e
+        only_e = set_e - set_j
+
+        # COMMON scoring
+        jina_common_raw = {i: jina_map[i] for i in common}
+        e5_common_raw = {i: e5_map[i] for i in common}
+
+        jina_common_scaled = _build_scaled_maps(jina_common_raw, method=scale_method)
+        e5_common_scaled = _build_scaled_maps(e5_common_raw, method=scale_method)
+
+        common_results = []
+        for idx_ in common:
+            sj = float(jina_common_scaled.get(idx_, 0.0))
+            se = float(e5_common_scaled.get(idx_, 0.0))
+            mean_s = (sj + se) / 2.0
+            common_results.append({
+                "idx": int(idx_),
+                "group": "common",
+                "mean_score": float(mean_s),
+                "jina_raw": float(jina_map[idx_]),
+                "e5_raw": float(e5_map[idx_]),
+                "jina_scaled": float(sj),
+                "e5_scaled": float(se),
+                "text": self.all_chunks[idx_],
+            })
+        common_results.sort(key=lambda x: x["mean_score"], reverse=True)
+        if top_n_common is not None:
+            common_results = common_results[:top_n_common]
+
+        # SINGLE scoring with "imaginary" extrapolated score
+        jina_single_raw = {i: jina_map[i] for i in only_j}
+        e5_single_raw = {i: e5_map[i] for i in only_e}
+
+        jina_single_scaled = _build_scaled_maps(jina_single_raw, method=scale_method)
+        e5_single_scaled = _build_scaled_maps(e5_single_raw, method=scale_method)
+
+        jina_single_scaled_dist = sorted(jina_single_scaled.values())
+        e5_single_scaled_dist = sorted(e5_single_scaled.values())
+
+        jina_single_rankpct = _rank_percentiles(jina_single_raw)
+        e5_single_rankpct = _rank_percentiles(e5_single_raw)
+
+        single_results = []
+
+        for idx_ in only_j:
+            real = float(jina_single_scaled.get(idx_, 0.0))
+            pct = float(jina_single_rankpct.get(idx_, 0.0))
+            imagined = _quantile_from_scaled_distribution(e5_single_scaled_dist, pct)
+            mean_s = (real + imagined) / 2.0
+            single_results.append({
+                "idx": int(idx_),
+                "group": "single_jina",
+                "mean_score": float(mean_s),
+                "jina_raw": float(jina_map[idx_]),
+                "e5_raw": None,
+                "jina_scaled": float(real),
+                "e5_scaled": float(imagined),
+                "text": self.all_chunks[idx_],
+            })
+
+        for idx_ in only_e:
+            real = float(e5_single_scaled.get(idx_, 0.0))
+            pct = float(e5_single_rankpct.get(idx_, 0.0))
+            imagined = _quantile_from_scaled_distribution(jina_single_scaled_dist, pct)
+            mean_s = (real + imagined) / 2.0
+            single_results.append({
+                "idx": int(idx_),
+                "group": "single_e5",
+                "mean_score": float(mean_s),
+                "jina_raw": None,
+                "e5_raw": float(e5_map[idx_]),
+                "jina_scaled": float(imagined),
+                "e5_scaled": float(real),
+                "text": self.all_chunks[idx_],
+            })
+
+        single_results.sort(key=lambda x: x["mean_score"], reverse=True)
+        if top_n_single is not None:
+            single_results = single_results[:top_n_single]
+
+        return common_results + single_results
+
+    # -------------------------------------------------------------------
+    # Authoritative page mapping (the notebook behavior)
+    # -------------------------------------------------------------------
+    def _page_meta_from_pages_pickle(self, page_index: int) -> dict[str, Any]:
+        """
+        page_index aligns with data_loader arrays loaded from books_chunks.pickle.
+        This is the SAME idea as:
+          pages[chunks[idx]['page_index']]
+        """
+        meta: dict[str, Any] = {}
+
+        try:
+            i = int(page_index)
+        except Exception:
+            return meta
+
+        def _get(lst_name, default=None):
+            try:
+                lst = getattr(data_loader, lst_name, [])
+                if 0 <= i < len(lst):
+                    return lst[i]
+            except Exception:
+                pass
+            return default
+
+        meta["page_index"] = i
+        meta["book_name"] = _get("book_names", "")
+        meta["author"] = _get("authors", "")
+        meta["page_number"] = _get("page_numbers", None)
+        meta["printed_page_number"] = _get("printed_page_numbers", None)
+        meta["path"] = _normalize_rel_path(_get("paths", "") or "")
+        meta["Subjects"] = _get("Subject_list", [])
+        return meta
+
+    def _chunk_page_index(self, row_idx: int) -> Optional[int]:
+        """
+        Get page_index from semantic chunk row.
+        """
+        if self.chunks is None:
+            return None
+        if row_idx < 0 or row_idx >= len(self.chunks):
+            return None
+
+        ch = self.chunks[row_idx]
+        if not isinstance(ch, dict):
+            return None
+
+        pi = ch.get("page_index")
+        try:
+            if pi is None:
+                return None
+            return int(pi)
+        except Exception:
+            return None
+
+    def _chunk_source_ranges(self, row_idx: int) -> list[tuple[int, int]]:
+        """
+        source_ranges are expected to be in PAGE TEXT coordinates.
+        Your mapping pickle may contain them; if not, fallback to chunk fields.
+        """
+        if self.chunks is None:
+            return []
+
+        ch = self.chunks[row_idx]
+        if not isinstance(ch, dict):
+            return []
+
+        sr = ch.get("source_ranges") or []
+        out = []
+        if isinstance(sr, (list, tuple)):
+            for r in sr:
+                if isinstance(r, (list, tuple)) and len(r) == 2:
+                    try:
+                        out.append((int(r[0]), int(r[1])))
+                    except Exception:
+                        continue
+                elif isinstance(r, dict):
+                    try:
+                        out.append((int(r.get("start")), int(r.get("end"))))
+                    except Exception:
+                        continue
+        return out
+
+
+    # -------------------------------------------------------------------
+    # Public API (routes.py compatible)
+    # -------------------------------------------------------------------
+    @lru_cache(maxsize=2048)
+    def search_chunk_indices(self, query: str, k: int = 80) -> tuple[int, ...]:
+        """
+        Returns ordered chunk row indices using the new hybrid algorithm.
+        `k` is treated as a soft cap (we cap after ranking).
+        """
+        self.load()
+
+        if not query or not str(query).strip():
+            return tuple()
+
+        if self.index_e5 is None or self.index_jina is None:
+            return tuple()
+
+        ntotal = int(self.index_e5.ntotal)
+
+        candidate_k = min(ntotal, 250000)
+
+        jina_kwargs = dict(self._DEFAULT_JINA_KWARGS)
+        e5_kwargs = dict(self._DEFAULT_E5_KWARGS)
+        jina_kwargs["candidate_k"] = candidate_k
+        e5_kwargs["candidate_k"] = candidate_k
+
+        ranked = self._hybrid_two_stage_rank(
+            query,
+            jina_kwargs=jina_kwargs,
+            e5_kwargs=e5_kwargs,
+            scale_method="minmax",
+            top_n_common=None,
+            top_n_single=None,
+            print_debug=False,
+        )
+
+        idxs = [int(x["idx"]) for x in ranked if "idx" in x]
+        seen = set()
+        out = []
+        for i in idxs:
+            if i not in seen:
+                out.append(i)
+                seen.add(i)
+
+        try:
+            kk = int(k)
+            if kk > 0:
+                out = out[:kk]
+        except Exception:
+            pass
+
+        return tuple(out)
+
+    @lru_cache(maxsize=2048)
+    def search(self, query: str, k: int = 300000) -> tuple[dict[str, Any], ...]:
+        """
+        Returns CHUNK-level hits (NOT pages).
+
+        Each hit contains:
+          - chunk_index: index in chunks_tobe_embedded.pickle (aligned with embeddings rows)
+          - page_index: index into pages corpus (books_chunks.pickle / data_loader arrays)
+          - source_ranges: spans in PAGE text coordinates (as stored in chunk object)
+          - semantic_score: hybrid mean_score
+          - chunk_text: the chunk text (optional for debugging)
+
+        Routes will aggregate these chunk hits into PAGE-level results to match frontend schema.
+        """
+        self.load()
+
+        q = (query or "").strip()
+        if not q:
+            return tuple()
+
+        if self.index_e5 is None or self.index_jina is None:
+            return tuple()
+
+        ntotal = int(self.index_e5.ntotal)
+        candidate_k = min(ntotal, 300000)
+
+        jina_kwargs = dict(self._DEFAULT_JINA_KWARGS)
+        e5_kwargs = dict(self._DEFAULT_E5_KWARGS)
+        jina_kwargs["candidate_k"] = candidate_k
+        e5_kwargs["candidate_k"] = candidate_k
+
+        ranked = self._hybrid_two_stage_rank(
+            q,
+            jina_kwargs=jina_kwargs,
+            e5_kwargs=e5_kwargs,
+            scale_method="minmax",
+            top_n_common=None,
+            top_n_single=None,
+            print_debug=False,
+        )
+
+        hits = []
+        seen_chunks = set()
+
+        # Soft cap k at chunk-level here; routes may still reduce after page aggregation
+        try:
+            kk = int(k)
+            if kk <= 0:
+                kk = 80
+        except Exception:
+            kk = 80
+
+        for r in ranked:
+            try:
+                chunk_idx = int(r["idx"])
+            except Exception:
+                continue
+
+            if chunk_idx in seen_chunks:
+                continue
+            seen_chunks.add(chunk_idx)
+
+            ch = None
+            if self.chunks is not None and 0 <= chunk_idx < len(self.chunks):
+                ch = self.chunks[chunk_idx]
+
+            if not isinstance(ch, dict):
+                continue
+
+            # page_index is the LINK to books_chunks/pages
+            try:
+                page_index = ch.get("page_index", None)
+                page_index = None if page_index is None else int(page_index)
+            except Exception:
+                page_index = None
+
+            # source_ranges are already in PAGE coordinates in your chunk objects
+            sr = ch.get("source_ranges") or []
+            # Keep raw; routes will sanitize/clip/merge using page text length.
+            # But normalize basic tuple/dict structure to tuples if possible.
+            source_ranges = []
+            if isinstance(sr, (list, tuple)):
+                for rr in sr:
+                    if isinstance(rr, (list, tuple)) and len(rr) == 2:
+                        try:
+                            source_ranges.append((int(rr[0]), int(rr[1])))
+                        except Exception:
+                            pass
+                    elif isinstance(rr, dict):
+                        try:
+                            source_ranges.append((int(rr.get("start")), int(rr.get("end"))))
+                        except Exception:
+                            pass
+
+            try:
+                score = float(r.get("mean_score", 0.0))
+            except Exception:
+                score = 0.0
+
+            hits.append({
+                "chunk_index": chunk_idx,
+                "page_index": page_index,
+                "semantic_score": score,
+                "source_ranges": source_ranges,
+                "chunk_text": ch.get("text", ""),
+                "group": r.get("group"),
+            })
+
+            if len(hits) >= kk:
+                break
+
+        return tuple(hits)
+
+    # Optional alias if you prefer explicit naming in routes
+    def search_chunks(self, query: str, k: int = 80) -> tuple[dict[str, Any], ...]:
+        return self.search(query, k=k)
+        
+        # ============================================================
+    # Subset semantic search: auto-tune on filtered subset ONLY
+    # ============================================================
+
+    def _subset_key_from_pages(self, pages: list[int]) -> str:
+        uniq = sorted({int(x) for x in (pages or [])})
+        raw = (",".join(map(str, uniq))).encode("utf-8")
+        return hashlib.sha1(raw).hexdigest()
+
+    def _subset_cache_get(self, key: str):
+        v = self._subset_index_cache.get(key)
+        if v is not None:
+            self._subset_index_cache.move_to_end(key)
+        return v
+
+    def _subset_cache_put(self, key: str, value: dict[str, Any]):
+        self._subset_index_cache[key] = value
+        self._subset_index_cache.move_to_end(key)
+        while len(self._subset_index_cache) > int(self._subset_index_cache_max):
+            self._subset_index_cache.popitem(last=False)
+
+    def _build_subset_indices_for_pages(self, valid_page_indices: list[int]) -> dict[str, Any]:
+        """
+        Build FAISS indices restricted to chunks whose chunk['page_index'] is in valid_page_indices.
+        Returns:
+          {
+            'index_e5_sub': faiss.Index,
+            'index_jina_sub': faiss.Index,
+            'chunk_ids': np.ndarray[int32]  # local_id -> global_chunk_id
+          }
+        """
+        if self.chunks is None or self.emb_e5 is None or self.emb_jina is None:
+            raise RuntimeError("Engine not loaded.")
+
+        page_set = {int(x) for x in (valid_page_indices or [])}
+
+        chunk_ids = []
+        for i, ch in enumerate(self.chunks):
+            if not isinstance(ch, dict):
+                continue
+            pi = ch.get("page_index", None)
+            try:
+                pi = None if pi is None else int(pi)
+            except Exception:
+                pi = None
+            if pi is None:
+                continue
+            if pi in page_set:
+                chunk_ids.append(int(i))
+
+        chunk_ids_arr = np.asarray(chunk_ids, dtype=np.int32)
+        if chunk_ids_arr.size == 0:
+            return {"index_e5_sub": None, "index_jina_sub": None, "chunk_ids": chunk_ids_arr}
+
+        emb_e5_sub = _as_f32(self.emb_e5[chunk_ids_arr])
+        emb_jina_sub = _as_f32(self.emb_jina[chunk_ids_arr])
+
+        idx_e5 = faiss.IndexFlatIP(emb_e5_sub.shape[1])
+        idx_e5.add(emb_e5_sub)
+
+        idx_j = faiss.IndexFlatIP(emb_jina_sub.shape[1])
+        idx_j.add(emb_jina_sub)
+
+        return {"index_e5_sub": idx_e5, "index_jina_sub": idx_j, "chunk_ids": chunk_ids_arr}
+
+    def _get_query_candidates_subset(
+        self,
+        query: str,
+        *,
+        model_name: str,
+        candidate_k: int,
+        index_override: faiss.Index,
+        chunk_ids_map: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Like _get_query_candidates, but searches subset index and maps local ids -> global chunk ids.
+        """
+        if self.jina is None or self.e5 is None:
+            raise RuntimeError("Engine not loaded.")
+
+        q = undiacritize(query)
+
+        if model_name == "jina":
+            q_emb = self.jina.encode(
+                [q],
+                task="retrieval.query",
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            q_emb = _as_f32(q_emb)
+            k = min(int(candidate_k), int(index_override.ntotal))
+            D, I = index_override.search(q_emb, k)
+            local_ids = I[0]
+            global_ids = np.array(
+                [-1 if int(x) == -1 else int(chunk_ids_map[int(x)]) for x in local_ids],
+                dtype=np.int64,
+            )
+            return D[0], global_ids
+
+        if model_name == "e5":
+            q_emb = self.e5.encode(
+                [f"query: {q}"],
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            q_emb = _as_f32(q_emb)
+            k = min(int(candidate_k), int(index_override.ntotal))
+            D, I = index_override.search(q_emb, k)
+            local_ids = I[0]
+            global_ids = np.array(
+                [-1 if int(x) == -1 else int(chunk_ids_map[int(x)]) for x in local_ids],
+                dtype=np.int64,
+            )
+            return D[0], global_ids
+
+        raise ValueError("model_name must be 'jina' or 'e5'")
+
+    def _auto_tune_threshold_for_query_subset(
+        self,
+        query: str,
+        *,
+        model_name: str,
+        start_threshold: float,
+        min_hits: int,
+        max_hits: int,
+        candidate_k: int,
+        step: float,
+        min_threshold: float,
+        max_threshold: float,
+        max_iters: int,
+        max_results=None,
+        verbose: bool = False,
+        index_override: faiss.Index,
+        chunk_ids_map: np.ndarray,
+    ) -> Tuple[float, List[Tuple[float, int]]]:
+        scores, ids = self._get_query_candidates_subset(
+            query,
+            model_name=model_name,
+            candidate_k=candidate_k,
+            index_override=index_override,
+            chunk_ids_map=chunk_ids_map,
+        )
+
+        thr = float(start_threshold)
+        best_thr = thr
+        best_hits = self._filter_hits_by_threshold(scores, ids, thr, max_results=max_results)
+        best_count = len(best_hits)
+
+        if min_hits <= best_count <= max_hits:
+            return thr, best_hits
+
+        visited = set()
+
+        for _it in range(int(max_iters)):
+            key = round(thr, 6)
+            if key in visited:
+                break
+            visited.add(key)
+
+            count = len(self._filter_hits_by_threshold(scores, ids, thr, max_results=None))
+
+            if count < min_hits:
+                dist = min_hits - count
+            elif count > max_hits:
+                dist = count - max_hits
+            else:
+                dist = 0
+
+            if best_count < min_hits:
+                best_dist = min_hits - best_count
+            elif best_count > max_hits:
+                best_dist = best_count - max_hits
+            else:
+                best_dist = 0
+
+            if dist < best_dist:
+                best_thr = thr
+                best_count = count
+                best_hits = self._filter_hits_by_threshold(scores, ids, thr, max_results=max_results)
+
+            if min_hits <= count <= max_hits:
+                final_hits = self._filter_hits_by_threshold(scores, ids, thr, max_results=max_results)
+                return thr, final_hits
+
+            if count < min_hits:
+                thr -= float(step)
+            else:
+                thr += float(step)
+
+            thr = max(float(min_threshold), min(float(max_threshold), thr))
+
+            if thr in (float(min_threshold), float(max_threshold)):
+                break
+
+        return best_thr, best_hits
+
+    def _run_model_retrieval_autotuned_subset(
+        self,
+        query: str,
+        *,
+        model_name: str,
+        tuned_kwargs: dict,
+        index_override: faiss.Index,
+        chunk_ids_map: np.ndarray,
+    ) -> Tuple[float, Dict[int, float]]:
+        thr, hits = self._auto_tune_threshold_for_query_subset(
+            query,
+            model_name=model_name,
+            index_override=index_override,
+            chunk_ids_map=chunk_ids_map,
+            **tuned_kwargs,
+        )
+        out: Dict[int, float] = {}
+        for score, idx_ in hits:
+            if idx_ not in out or score > out[idx_]:
+                out[idx_] = float(score)
+        return thr, out
+
+    def _hybrid_two_stage_rank_subset(
+        self,
+        query: str,
+        *,
+        jina_kwargs: dict,
+        e5_kwargs: dict,
+        index_jina_sub: faiss.Index,
+        index_e5_sub: faiss.Index,
+        chunk_ids_map: np.ndarray,
+        scale_method: str = "minmax",
+        top_n_common=None,
+        top_n_single=None,
+        print_debug: bool = False,
+    ) -> List[Dict[str, Any]]:
+        # Same logic as _hybrid_two_stage_rank, but retrieval happens from subset indices
+        _, jina_map = self._run_model_retrieval_autotuned_subset(
+            query,
+            model_name="jina",
+            tuned_kwargs=jina_kwargs,
+            index_override=index_jina_sub,
+            chunk_ids_map=chunk_ids_map,
+        )
+        _, e5_map = self._run_model_retrieval_autotuned_subset(
+            query,
+            model_name="e5",
+            tuned_kwargs=e5_kwargs,
+            index_override=index_e5_sub,
+            chunk_ids_map=chunk_ids_map,
+        )
+
+        set_j, set_e = set(jina_map.keys()), set(e5_map.keys())
+        common = set_j & set_e
+        only_j = set_j - set_e
+        only_e = set_e - set_j
+
+        jina_common_raw = {i: jina_map[i] for i in common}
+        e5_common_raw = {i: e5_map[i] for i in common}
+
+        jina_common_scaled = _build_scaled_maps(jina_common_raw, method=scale_method)
+        e5_common_scaled = _build_scaled_maps(e5_common_raw, method=scale_method)
+
+        common_results = []
+        for idx_ in common:
+            sj = float(jina_common_scaled.get(idx_, 0.0))
+            se = float(e5_common_scaled.get(idx_, 0.0))
+            mean_s = (sj + se) / 2.0
+            common_results.append({
+                "idx": int(idx_),
+                "group": "common",
+                "mean_score": float(mean_s),
+                "jina_raw": float(jina_map[idx_]),
+                "e5_raw": float(e5_map[idx_]),
+                "jina_scaled": float(sj),
+                "e5_scaled": float(se),
+                "text": self.all_chunks[int(idx_)] if hasattr(self, "all_chunks") else "",
+            })
+        common_results.sort(key=lambda x: x["mean_score"], reverse=True)
+        if top_n_common is not None:
+            common_results = common_results[:top_n_common]
+
+        jina_single_raw = {i: jina_map[i] for i in only_j}
+        e5_single_raw = {i: e5_map[i] for i in only_e}
+
+        jina_single_scaled = _build_scaled_maps(jina_single_raw, method=scale_method)
+        e5_single_scaled = _build_scaled_maps(e5_single_raw, method=scale_method)
+
+        jina_single_scaled_dist = sorted(jina_single_scaled.values())
+        e5_single_scaled_dist = sorted(e5_single_scaled.values())
+
+        jina_single_rankpct = _rank_percentiles(jina_single_raw)
+        e5_single_rankpct = _rank_percentiles(e5_single_raw)
+
+        single_results = []
+
+        for idx_ in only_j:
+            real = float(jina_single_scaled.get(idx_, 0.0))
+            pct = float(jina_single_rankpct.get(idx_, 0.0))
+            imagined = _quantile_from_scaled_distribution(e5_single_scaled_dist, pct)
+            mean_s = (real + imagined) / 2.0
+            single_results.append({
+                "idx": int(idx_),
+                "group": "single_jina",
+                "mean_score": float(mean_s),
+                "jina_raw": float(jina_map[idx_]),
+                "e5_raw": None,
+                "jina_scaled": float(real),
+                "e5_scaled": float(imagined),
+                "text": self.all_chunks[int(idx_)] if hasattr(self, "all_chunks") else "",
+            })
+
+        for idx_ in only_e:
+            real = float(e5_single_scaled.get(idx_, 0.0))
+            pct = float(e5_single_rankpct.get(idx_, 0.0))
+            imagined = _quantile_from_scaled_distribution(jina_single_scaled_dist, pct)
+            mean_s = (real + imagined) / 2.0
+            single_results.append({
+                "idx": int(idx_),
+                "group": "single_e5",
+                "mean_score": float(mean_s),
+                "jina_raw": None,
+                "e5_raw": float(e5_map[idx_]),
+                "jina_scaled": float(imagined),
+                "e5_scaled": float(real),
+                "text": self.all_chunks[int(idx_)] if hasattr(self, "all_chunks") else "",
+            })
+
+        single_results.sort(key=lambda x: x["mean_score"], reverse=True)
+        if top_n_single is not None:
+            single_results = single_results[:top_n_single]
+
+        return common_results + single_results
+
+    def search_in_pages(
+        self,
+        query: str,
+        *,
+        valid_page_indices: list[int],
+        k: int = 300000,
+    ) -> tuple[dict[str, Any], ...]:
+        """
+        ✅ This is exactly what you asked:
+        auto-tune semantic retrieval on the FILTERED subset ONLY.
+
+        - Build (or reuse cached) subset FAISS indices restricted to valid_page_indices
+        - Run the SAME hybrid autotune logic (same defaults) on that subset
+        - Return hits in the SAME format as .search()
+        """
+        self.load()
+
+        q = (query or "").strip()
+        if not q:
+            return tuple()
+
+        if self.chunks is None or self.emb_e5 is None or self.emb_jina is None:
+            return tuple()
+
+        pages = list(valid_page_indices or [])
+        if not pages:
+            return tuple()
+
+        key = self._subset_key_from_pages(pages)
+        cached = self._subset_cache_get(key)
+        if cached is None:
+            cached = self._build_subset_indices_for_pages(pages)
+            self._subset_cache_put(key, cached)
+
+        index_e5_sub = cached.get("index_e5_sub")
+        index_jina_sub = cached.get("index_jina_sub")
+        chunk_ids_map = cached.get("chunk_ids")
+
+        if index_e5_sub is None or index_jina_sub is None or chunk_ids_map is None:
+            return tuple()
+
+        subset_n = int(index_e5_sub.ntotal)
+        if subset_n <= 0:
+            return tuple()
+
+        candidate_k = min(subset_n, 300000)
+
+        # EXACT same defaults you already use (no new knobs)
+        jina_kwargs = dict(self._DEFAULT_JINA_KWARGS)
+        e5_kwargs = dict(self._DEFAULT_E5_KWARGS)
+        jina_kwargs["candidate_k"] = candidate_k
+        e5_kwargs["candidate_k"] = candidate_k
+
+        ranked = self._hybrid_two_stage_rank_subset(
+            q,
+            jina_kwargs=jina_kwargs,
+            e5_kwargs=e5_kwargs,
+            index_jina_sub=index_jina_sub,
+            index_e5_sub=index_e5_sub,
+            chunk_ids_map=chunk_ids_map,
+            scale_method="minmax",
+            top_n_common=None,
+            top_n_single=None,
+            print_debug=False,
+        )
+
+        try:
+            kk = int(k)
+            if kk <= 0:
+                kk = 80
+        except Exception:
+            kk = 80
+
+        hits = []
+        seen_chunks = set()
+
+        for r in ranked:
+            try:
+                chunk_idx = int(r["idx"])  # GLOBAL chunk id
+            except Exception:
+                continue
+
+            if chunk_idx in seen_chunks:
+                continue
+            seen_chunks.add(chunk_idx)
+
+            ch = self.chunks[chunk_idx] if 0 <= chunk_idx < len(self.chunks) else None
+            if not isinstance(ch, dict):
+                continue
+
+            try:
+                page_index = ch.get("page_index", None)
+                page_index = None if page_index is None else int(page_index)
+            except Exception:
+                page_index = None
+
+            sr = ch.get("source_ranges") or []
+            source_ranges = []
+            if isinstance(sr, (list, tuple)):
+                for rr in sr:
+                    if isinstance(rr, (list, tuple)) and len(rr) == 2:
+                        try:
+                            source_ranges.append((int(rr[0]), int(rr[1])))
+                        except Exception:
+                            pass
+                    elif isinstance(rr, dict):
+                        try:
+                            source_ranges.append((int(rr.get("start")), int(rr.get("end"))))
+                        except Exception:
+                            pass
+
+            try:
+                score = float(r.get("mean_score", 0.0))
+            except Exception:
+                score = 0.0
+
+            hits.append({
+                "chunk_index": chunk_idx,
+                "page_index": page_index,
+                "semantic_score": score,
+                "source_ranges": source_ranges,
+                "chunk_text": ch.get("text", ""),
+                "group": r.get("group"),
+            })
+
+            if len(hits) >= kk:
+                break
+
+        return tuple(hits)
+
+######
+
+C:\Users\Abderrahman\Desktop\new_legal_ai\backend_BO\app\services.py
+
+import re
+import threading
+from datetime import datetime, timezone
+
+from . import data_loader as dl
+
+_ARABIC_DIACRITICS = re.compile(r'[\u064B-\u065F\u0670\u06D6-\u06ED\u0640]')
+_ALLOWED = re.compile(r'[^0-9\u0600-\u06FFa-zA-Z\s\-/\._:]')
+
+
+# -------------------------------------------------------------------
+# Text normalization
+# -------------------------------------------------------------------
+def normalize_arabic(text: str) -> str:
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+
+    text = text.strip()
+    if not text:
+        return ""
+
+    text = _ARABIC_DIACRITICS.sub('', text)
+    text = re.sub(r'[إأآا]', 'ا', text)
+    text = re.sub(r'[يى]', 'ي', text)
+    text = re.sub(r'ة', 'ه', text)
+
+    # Arabic-Indic digits -> Western digits
+    trans = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+    text = text.translate(trans)
+
+    text = text.casefold()
+    text = _ALLOWED.sub(' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def _strip_leading_topic_number(s: str) -> str:
+    if not s:
+        return s
+    return re.sub(r'^\s*\d{1,3}\s*[\.\-]\s*', '', s).strip()
+
+
+# -------------------------------------------------------------------
+# Generic helpers
+# -------------------------------------------------------------------
+def _as_clean_list(value):
+    """
+    Accepts:
+      - None
+      - single string
+      - list / tuple / set
+    Returns list[str] stripped, without empties.
+    """
+    if value is None:
+        return []
+
+    if isinstance(value, (list, tuple, set)):
+        out = []
+        for x in value:
+            s = str(x).strip()
+            if s:
+                out.append(s)
+        return out
+
+    s = str(value).strip()
+    return [s] if s else []
+
+
+def _normalize_value_set(values):
+    out = set()
+    for v in _as_clean_list(values):
+        n = normalize_arabic(v)
+        if n:
+            out.add(n)
+    return out
+
+
+def _normalize_subject_like_values(values):
+    """
+    For subject-style labels, keep support for stripping leading numbering.
+    """
+    out = set()
+    for v in _as_clean_list(values):
+        n1 = normalize_arabic(v)
+        if n1:
+            out.add(n1)
+        n2 = normalize_arabic(_strip_leading_topic_number(v))
+        if n2:
+            out.add(n2)
+    return out
+
+
+def _parse_filter_date(v):
+    """
+    Parse date filters safely.
+
+    Supports:
+      - YYYY-MM-DD
+      - full ISO datetime
+      - ISO ending with Z
+    Returns timezone-aware datetime or None.
+    """
+    if v is None:
+        return None
+
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+
+    s = str(v).strip()
+    if not s:
+        return None
+
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        pass
+
+    try:
+        return datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+# -------------------------------------------------------------------
+# Caches
+# -------------------------------------------------------------------
+_cache_version = None
+
+_chunks_norm = None
+_filename_norm = None
+_subjects_norm = None       # list[set[str]]
+_signatures_norm = None     # list[set[str]]
+_doctypes_norm = None       # list[str]
+_lawnumbers_norm = None     # list[str]
+_dates_cache = None         # list[datetime|None]
+
+_filename_index_norm = None     # dict[str, list[int]]
+_doctype_index_norm = None      # dict[str, list[int]]
+_lawnumber_index_norm = None    # dict[str, list[int]]
+
+_cache_lock = threading.Lock()
+
+
+def _ensure_caches():
+    global _cache_version
+    global _chunks_norm, _filename_norm, _subjects_norm, _signatures_norm
+    global _doctypes_norm, _lawnumbers_norm, _dates_cache
+    global _filename_index_norm, _doctype_index_norm, _lawnumber_index_norm
+
+    ver = getattr(dl, "DATA_VERSION", None)
+    if ver is None:
+        ver = (id(dl.chunks), len(dl.chunks))
+
+    if (
+        _cache_version == ver
+        and _chunks_norm is not None
+        and _filename_index_norm is not None
+        and _doctype_index_norm is not None
+        and _lawnumber_index_norm is not None
+    ):
+        return
+
+    with _cache_lock:
+        ver = getattr(dl, "DATA_VERSION", None)
+        if ver is None:
+            ver = (id(dl.chunks), len(dl.chunks))
+
+        if (
+            _cache_version == ver
+            and _chunks_norm is not None
+            and _filename_index_norm is not None
+            and _doctype_index_norm is not None
+            and _lawnumber_index_norm is not None
+        ):
+            return
+
+        _chunks_norm = [normalize_arabic(c) for c in dl.chunks]
+        _filename_norm = [normalize_arabic(x) for x in getattr(dl, "filenames", [])]
+        _doctypes_norm = [normalize_arabic(x) for x in getattr(dl, "doctypes", [])]
+        _lawnumbers_norm = [normalize_arabic(x) for x in getattr(dl, "lawnumbers", [])]
+        _dates_cache = list(getattr(dl, "dates_parsed", []))
+
+        # subjects cache
+        _subjects_norm = []
+        for subs in getattr(dl, "subjects_list", []):
+            sset = set()
+            if subs:
+                for x in subs:
+                    if x is None:
+                        continue
+                    raw = str(x).strip()
+                    if not raw:
+                        continue
+                    n1 = normalize_arabic(raw)
+                    if n1:
+                        sset.add(n1)
+                    n2 = normalize_arabic(_strip_leading_topic_number(raw))
+                    if n2:
+                        sset.add(n2)
+            _subjects_norm.append(sset)
+
+        # signatures cache
+        _signatures_norm = []
+        for sigs in getattr(dl, "signatures_list", []):
+            sset = set()
+            if sigs:
+                for x in sigs:
+                    if x is None:
+                        continue
+                    raw = str(x).strip()
+                    if not raw:
+                        continue
+                    n = normalize_arabic(raw)
+                    if n:
+                        sset.add(n)
+            _signatures_norm.append(sset)
+
+        # exact normalized indexes for dropdown-based filters
+        filename_idx = {}
+        for i, val in enumerate(_filename_norm):
+            if not val:
+                continue
+            filename_idx.setdefault(val, []).append(i)
+
+        doctype_idx = {}
+        for i, val in enumerate(_doctypes_norm):
+            if not val:
+                continue
+            doctype_idx.setdefault(val, []).append(i)
+
+        lawnumber_idx = {}
+        for i, val in enumerate(_lawnumbers_norm):
+            if not val:
+                continue
+            lawnumber_idx.setdefault(val, []).append(i)
+
+        _filename_index_norm = filename_idx
+        _doctype_index_norm = doctype_idx
+        _lawnumber_index_norm = lawnumber_idx
+
+        _cache_version = ver
+
+
+# -------------------------------------------------------------------
+# Filter extraction helpers
+# -------------------------------------------------------------------
+def _extract_date_range(filters):
+    """
+    Supports any of:
+      - {"date": {"from": "...", "to": "..."}}
+      - {"date_from": "...", "date_to": "..."}
+      - {"dateFrom": "...", "dateTo": "..."}
+    """
+    date_from = filters.get("date_from")
+    date_to = filters.get("date_to")
+
+    if date_from is None and date_to is None:
+        date_from = filters.get("dateFrom")
+        date_to = filters.get("dateTo")
+
+    date_obj = filters.get("date")
+    if isinstance(date_obj, dict):
+        if date_from is None:
+            date_from = date_obj.get("from", date_obj.get("date_from", date_obj.get("start")))
+        if date_to is None:
+            date_to = date_obj.get("to", date_obj.get("date_to", date_obj.get("end")))
+
+    return _parse_filter_date(date_from), _parse_filter_date(date_to)
+
+
+def _intersect_with_index_map(valid, selected_values, index_map):
+    """
+    Given currently valid indices and selected normalized values,
+    keep rows whose field matches ANY selected value exactly.
+    """
+    if not selected_values:
+        return valid
+
+    selected_hits = set()
+    for val in selected_values:
+        hits = index_map.get(val)
+        if hits:
+            selected_hits.update(hits)
+
+    if not selected_hits:
+        return []
+
+    return [i for i in valid if i in selected_hits]
+
+
+# -------------------------------------------------------------------
+# Legal filters
+# -------------------------------------------------------------------
+def get_valid_indices(filters):
+    """
+    Supported legal filters:
+      - mandatoryKeywords: list[str]          -> ALL must appear in page text
+      - filename: str | list[str]             -> OR exact match on selected values
+      - subjects: str | list[str]             -> OR within page subjects
+      - signatures: str | list[str]           -> OR within page signatures
+      - doctype: str | list[str]              -> OR exact match on selected values
+      - lawnumber: str | list[str]            -> OR exact match on selected values
+      - date / date_from / date_to            -> inclusive range
+
+    Backward-compatible fallbacks:
+      - topics   -> subjects
+      - bookName -> filename
+    """
+    _ensure_caches()
+
+    mandatory_keywords = filters.get("mandatoryKeywords", []) or []
+
+    # new names with backward-compatible fallbacks
+    filenames_filter = filters.get("filename")
+    if filenames_filter is None:
+        filenames_filter = filters.get("bookName")
+
+    subjects_filter = filters.get("subjects")
+    if subjects_filter is None:
+        subjects_filter = filters.get("topics")
+
+    signatures_filter = filters.get("signatures")
+    doctypes_filter = filters.get("doctype")
+    lawnumbers_filter = filters.get("lawnumber")
+
+    date_from, date_to = _extract_date_range(filters)
+
+    # Start with all rows
+    valid = list(range(len(dl.chunks)))
+    if not valid:
+        return []
+
+    # filename exact OR
+    filename_selected = _normalize_value_set(filenames_filter)
+    if filename_selected:
+        valid = _intersect_with_index_map(valid, filename_selected, _filename_index_norm)
+        if not valid:
+            return []
+
+    # doctype exact OR
+    doctype_selected = _normalize_value_set(doctypes_filter)
+    if doctype_selected:
+        valid = _intersect_with_index_map(valid, doctype_selected, _doctype_index_norm)
+        if not valid:
+            return []
+
+    # lawnumber exact OR
+    lawnumber_selected = _normalize_value_set(lawnumbers_filter)
+    if lawnumber_selected:
+        valid = _intersect_with_index_map(valid, lawnumber_selected, _lawnumber_index_norm)
+        if not valid:
+            return []
+
+    # mandatory keywords: ALL must appear in normalized text
+    if mandatory_keywords:
+        kws = [normalize_arabic(x) for x in mandatory_keywords if str(x).strip()]
+        kws = [kw for kw in kws if kw]
+        if kws:
+            valid = [i for i in valid if all(kw in _chunks_norm[i] for kw in kws)]
+            if not valid:
+                return []
+
+    # subjects: OR among selected values
+    subject_selected = _normalize_subject_like_values(subjects_filter)
+    if subject_selected:
+        valid = [i for i in valid if (_subjects_norm[i] & subject_selected)]
+        if not valid:
+            return []
+
+    # signatures: OR among selected values
+    signature_selected = _normalize_value_set(signatures_filter)
+    if signature_selected:
+        valid = [i for i in valid if (_signatures_norm[i] & signature_selected)]
+        if not valid:
+            return []
+
+    # date inclusive range
+    if date_from is not None or date_to is not None:
+        filtered = []
+        for i in valid:
+            row_dt = _dates_cache[i] if i < len(_dates_cache) else None
+            if row_dt is None:
+                continue
+            if date_from is not None and row_dt < date_from:
+                continue
+            if date_to is not None and row_dt > date_to:
+                continue
+            filtered.append(i)
+
+        valid = filtered
+        if not valid:
+            return []
+
+    return valid
+
+
+# -------------------------------------------------------------------
+# Main lexical query search
+# -------------------------------------------------------------------
+def search_fuzzy(query, valid_indices):
+    """
+    Pure normalized substring search over page text.
+
+    Supports:
+      - query: str
+      - query: list[str] -> OR across queries
+
+    Always respects valid_indices.
+    """
+    _ensure_caches()
+
+    def _unique_preserve_order(seq):
+        out = []
+        seen = set()
+        for x in seq:
+            if x not in seen:
+                out.append(x)
+                seen.add(x)
+        return out
+
+    valid_list = list(valid_indices)
+
+    # Multi-query OR
+    if isinstance(query, (list, tuple, set)):
+        raw_list = [str(x).strip() for x in query if str(x).strip()]
+        if not raw_list:
+            return [], []
+
+        expanded = []
+        result_set = set()
+
+        for raw in raw_list:
+            q_norm = normalize_arabic(raw)
+            if not q_norm:
+                continue
+
+            expanded.append(q_norm)
+
+            for i in valid_list:
+                if q_norm in _chunks_norm[i]:
+                    result_set.add(i)
+
+        result = sorted(result_set)
+        return result, _unique_preserve_order(expanded)
+
+    # Single query
+    if not isinstance(query, str):
+        return [], []
+
+    base = query.strip()
+    if not base:
+        return [], []
+
+    q_norm = normalize_arabic(base)
+    if not q_norm:
+        return [], []
+
+    result = [i for i in valid_list if q_norm in _chunks_norm[i]]
+    result.sort()
+    return result, [q_norm]
+
+
+# -------------------------------------------------------------------
+# Optional helper for the future filters endpoint
+# -------------------------------------------------------------------
+def get_filter_options():
+    """
+    Convenient backend helper for a future /filters/options endpoint.
+    """
+    _ensure_caches()
+
+    def _sorted_unique_str(values):
+        return sorted({str(v).strip() for v in values if str(v).strip()})
+
+    all_subjects = []
+    for row in getattr(dl, "subjects_list", []):
+        all_subjects.extend(row or [])
+
+    all_signatures = []
+    for row in getattr(dl, "signatures_list", []):
+        all_signatures.extend(row or [])
+
+    parsed_dates = [d for d in getattr(dl, "dates_parsed", []) if d is not None]
+
+    return {
+        "filenames": _sorted_unique_str(getattr(dl, "filenames", [])),
+        "subjects": _sorted_unique_str(all_subjects),
+        "signatures": _sorted_unique_str(all_signatures),
+        "doctypes": _sorted_unique_str(getattr(dl, "doctypes", [])),
+        "lawnumbers": _sorted_unique_str(getattr(dl, "lawnumbers", [])),
+        "date_bounds": {
+            "min": min(parsed_dates).isoformat().replace("+00:00", "Z") if parsed_dates else None,
+            "max": max(parsed_dates).isoformat().replace("+00:00", "Z") if parsed_dates else None,
+        },
+    }
+
+######
+
+C:\Users\Abderrahman\Desktop\new_legal_ai\backend_BO\app\__init__.py
+
+# backend_BO/app/__init__.py
+
+from flask import Flask
+from flask_cors import CORS
+from . import data_loader
+
+def create_app():
+    app = Flask(__name__)
+    app.config["JSON_AS_ASCII"] = False  # Arabic JSON
+
+    # Optional gzip compression (recommended for 20k results)
+    # pip install flask-compress
+    try:
+        from flask_compress import Compress
+        Compress(app)
+    except Exception:
+        pass
+
+    data_loader.load_chunks()
+    
+    from . import services
+    services._ensure_caches()
+
+
+    from .routes import main_bp
+    app.register_blueprint(main_bp)
+
+    CORS(app)
+    return app
+
+
+######
+
+C:\Users\Abderrahman\Desktop\new_legal_ai\backend_BO\app\ingestion\ingest_service.py
+
+# backend_BO/app/ingestion/ingest_service.py
+
+import json
+import os
+import queue
+import re
+import threading
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+# Kept for compatibility with the rest of the backend.
+# We intentionally do NOT reload or mutate the searchable corpus in this placeholder service.
+from .. import data_loader  # noqa: F401
+
+
+# -------------------------------------------------------------------
+# Global state
+# -------------------------------------------------------------------
+
+INGEST_LOCK = threading.Lock()  # kept for compatibility, unused in dummy mode
+
+# Legal use case for now: PDF only
+ALLOWED_EXT = {".pdf"}
+
+JOBS_LOCK = threading.Lock()
+JOBS = {}  # job_id -> job dict
+JOB_TTL_SECONDS = 60 * 60  # 1 hour
+
+
+# -------------------------------------------------------------------
+# Paths
+# -------------------------------------------------------------------
+
+def _app_root() -> Path:
+    # .../backend_BO
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _books_root_dir() -> Path:
+    """
+    Backward-compatible name.
+    Actual folder:
+      backend_BO/data/book_documents
+    """
+    p = _app_root() / "data" / "book_documents"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _books_pdf_dir() -> Path:
+    """
+    Required destination for uploaded legal PDFs:
+      backend_BO/data/book_documents/books_pdf
+    """
+    p = _books_root_dir() / "books_pdf"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _normalize_rel_path(p: str) -> str:
+    return (p or "").replace("\\", "/").lstrip("/")
+
+
+# -------------------------------------------------------------------
+# Small helpers
+# -------------------------------------------------------------------
+
+_filename_sanitize_re = re.compile(r'[<>:"/\\|?*\x00-\x1F]+')
+
+
+def sanitize_filename(name: str) -> str:
+    """
+    Lightweight filename sanitizer for Windows-safe storage.
+    Keeps extension handling to the caller.
+    """
+    s = (name or "").strip()
+    if not s:
+        return ""
+
+    s = _filename_sanitize_re.sub("_", s)
+    s = re.sub(r"\s+", " ", s).strip().rstrip(". ")
+    return s
+
+
+def _cleanup_old_jobs():
+    now = time.time()
+    with JOBS_LOCK:
+        dead = []
+        for jid, job in JOBS.items():
+            if now - job.get("created_ts", now) > JOB_TTL_SECONDS:
+                dead.append(jid)
+        for jid in dead:
+            JOBS.pop(jid, None)
+
+
+def _dedupe_target_path(target_dir: Path, desired_name: str) -> Path:
+    """
+    Avoid overwriting an existing uploaded PDF.
+    """
+    target = target_dir / desired_name
+    if not target.exists():
+        return target
+
+    stem = Path(desired_name).stem
+    ext = Path(desired_name).suffix
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return target_dir / f"{stem}_{ts}{ext}"
+
+
+# -------------------------------------------------------------------
+# Upload saving
+# -------------------------------------------------------------------
+
+def save_uploads_exact_structure(files) -> tuple[list[Path], list[dict], list[dict]]:
+    """
+    PDF-only placeholder uploader.
+
+    Saves accepted files to:
+      data/book_documents/books_pdf/<filename>.pdf
+
+    Returns:
+      saved_abs_paths
+      rejected_items: [{name, reason}]
+      docs_info: [{doc_key, name, stem, rel_path}]
+    """
+    target_dir = _books_pdf_dir()
+
+    rejected = []
+    saved = []
+    docs_info = []
+
+    for f in files:
+        filename = (getattr(f, "filename", "") or "").strip()
+        if not filename:
+            rejected.append({"name": "", "reason": "empty filename"})
+            continue
+
+        ext = Path(filename).suffix.lower()
+        if ext not in ALLOWED_EXT:
+            rejected.append({
+                "name": filename,
+                "reason": f"unsupported extension: {ext} (only .pdf is allowed)"
+            })
+            continue
+
+        safe_name = sanitize_filename(filename) or "document.pdf"
+        if not safe_name.lower().endswith(".pdf"):
+            safe_name = f"{Path(safe_name).stem}.pdf"
+
+        abs_path = _dedupe_target_path(target_dir, safe_name)
+        f.save(str(abs_path))
+
+        rel_under_books = abs_path.relative_to(_books_root_dir())
+        rel_norm = _normalize_rel_path(str(rel_under_books))
+
+        saved.append(abs_path)
+        docs_info.append({
+            "doc_key": rel_norm,
+            "name": abs_path.name,
+            "stem": Path(abs_path.name).stem,
+            "rel_path": rel_norm,
+        })
+
+    return saved, rejected, docs_info
+
+
+# -------------------------------------------------------------------
+# Dummy ingestion job creation
+# -------------------------------------------------------------------
+
+def start_ingest_job(files) -> dict:
+    """
+    Called by POST /admin/process.
+
+    Current legal-search behavior:
+      - accept only PDFs
+      - save them into books_pdf
+      - DO NOT process them
+      - DO NOT OCR them
+      - DO NOT update books_chunks.pickle
+      - DO NOT reload data_loader
+      - create an immediate finished dummy job for frontend compatibility
+    """
+    _cleanup_old_jobs()
+
+    saved_paths, rejected, docs_info = save_uploads_exact_structure(files)
+    if not saved_paths:
+        return {
+            "ok": False,
+            "message": "No valid PDF files accepted.",
+            "rejected": rejected,
+            "docs": [],
+        }
+
+    job_id = uuid.uuid4().hex
+    q = queue.Queue()
+
+    docs = {}
+    docs_order = []
+
+    for d in docs_info:
+        docs_order.append(d["doc_key"])
+        docs[d["doc_key"]] = {
+            "doc_key": d["doc_key"],
+            "name": d["name"],
+            "rel_path": d["rel_path"],
+            "status": "done",
+            "percent": 100,
+            "current_page": 0,
+            "total_pages": 0,
+            "message": "Upload accepted. Ingestion is disabled for now.",
+        }
+
+    result = {
+        "message": "PDF upload accepted, but ingestion/processing is disabled for now.",
+        "accepted_files": [Path(p).name for p in saved_paths],
+        "saved_count": len(saved_paths),
+        "processed": False,
+        "data_version": getattr(data_loader, "DATA_VERSION", None),
+    }
+
+    job = {
+        "job_id": job_id,
+        "created_ts": time.time(),
+        "status": "done",
+        "docs": docs,
+        "docs_order": docs_order,
+        "events": q,
+        "result": result,
+    }
+
+    with JOBS_LOCK:
+        JOBS[job_id] = job
+
+    # Queue some standard events so existing SSE consumers keep working.
+    q.put({
+        "type": "snapshot",
+        "job_id": job_id,
+        "docs": [docs[k] for k in docs_order],
+        "status": "done",
+    })
+
+    for key in docs_order:
+        q.put({
+            "type": "doc_done",
+            "doc_key": key,
+            "message": "Upload accepted. Ingestion is disabled for now.",
+        })
+
+    q.put({
+        "type": "done",
+        "message": result["message"],
+        "processed": False,
+        "data_version": result["data_version"],
+    })
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "docs": [docs[k] for k in docs_order],
+        "rejected": rejected,
+        "message": result["message"],
+    }
+
+
+# -------------------------------------------------------------------
+# Job inspection
+# -------------------------------------------------------------------
+
+def job_snapshot(job_id: str) -> dict | None:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return None
+
+        return {
+            "job_id": job["job_id"],
+            "status": job["status"],
+            "created_ts": job["created_ts"],
+            "docs": [job["docs"][k] for k in job["docs_order"]],
+            "result": job.get("result"),
+        }
+
+
+# -------------------------------------------------------------------
+# SSE
+# -------------------------------------------------------------------
+
+def sse_generator(job_id: str):
+    """
+    SSE stream for a job.
+
+    Even though jobs are immediate in dummy mode, we preserve the same
+    streaming contract used by the frontend.
+    """
+    snap = job_snapshot(job_id)
+    if not snap:
+        yield f"data: {json.dumps({'type': 'error', 'message': 'job not found'}, ensure_ascii=False)}\n\n"
+        return
+
+    # Send snapshot first
+    yield (
+        f"data: {json.dumps({'type': 'snapshot', 'job_id': job_id, 'docs': snap['docs'], 'status': snap['status']}, ensure_ascii=False)}\n\n"
+    )
+
+    last_keepalive = time.time()
+
+    while True:
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if not job:
+                break
+            q = job["events"]
+
+        try:
+            evt = q.get(timeout=1.0)
+            yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+        except queue.Empty:
+            pass
+
+        now = time.time()
+        if now - last_keepalive > 15:
+            yield ": keepalive\n\n"
+            last_keepalive = now
+
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if not job:
+                break
+            if job["status"] in ("done", "error") and job["events"].empty():
+                break
+
+######
+
+C:\Users\Abderrahman\Desktop\new_legal_ai\backend_BO\app\ingestion\ocrizer.py
+
+import os
+import time
+import base64
+import io
+import json
+import random
+import threading
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional
+
+import requests
+import fitz  # PyMuPDF
+from PIL import Image
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
+def _int_from_gradio_number(x, default: int = 1) -> int:
+    """Gradio Number typically yields float. Convert safely to int."""
+    try:
+        return int(float(x))
+    except Exception:
+        return int(default)
+
+
+def _atomic_write_text(path: str, text: str, encoding: str = "utf-8") -> None:
+    """Write text atomically (temp file in same dir, then os.replace)."""
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+
+    base = os.path.basename(path)
+    tmp_path = os.path.join(folder, f".{base}.tmp.{random.randint(100000, 999999)}")
+
+    with open(tmp_path, "w", encoding=encoding, newline="\n") as f:
+        f.write(text)
+
+    os.replace(tmp_path, path)
+
+
+def _needs_ocr(txt_path: str) -> bool:
+    """OCR needed if file missing, empty, unreadable, or only whitespace."""
+    if not os.path.exists(txt_path):
+        return True
+    if os.path.getsize(txt_path) == 0:
+        return True
+    try:
+        with open(txt_path, "r", encoding="utf-8") as f:
+            sample = f.read(500)
+        return not sample.strip()
+    except Exception:
+        return True
+
+
+# ============================================================
+# OpenRouter wrapper
+# ============================================================
+
+class OpenRouterAPIError(RuntimeError):
+    def __init__(self, status_code: int, payload: object, retry_after: Optional[float] = None):
+        super().__init__(f"OpenRouter API error ({status_code}): {payload}")
+        self.status_code = status_code
+        self.payload = payload
+        self.retry_after = retry_after
+
+
+@dataclass
+class _OpenRouterResponse:
+    text: str = ""
+
+
+class OpenRouterGenerativeModel:
+    """
+    Minimal wrapper for:
+      response = model.generate_content([prompt, pil_image], generation_config=gen_conf)
+      extracted_text = response.text
+
+    Thread-safe: one requests.Session per thread.
+    """
+    def __init__(self, model_name: str, api_key: str, referer: str = "", title: str = ""):
+        self.model_name = model_name
+        self.api_key = api_key
+        self.referer = referer or "http://localhost"
+        self.title = title or "PDF OCR"
+        self._tls = threading.local()
+
+    def _get_session(self) -> requests.Session:
+        s = getattr(self._tls, "session", None)
+        if s is None:
+            s = requests.Session()
+            s.headers.update({
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": self.referer,
+                "X-Title": self.title,
+            })
+            self._tls.session = s
+        return s
+
+    @staticmethod
+    def _pil_to_data_url(image: Image.Image, prefer_format: str = "JPEG") -> str:
+        fmt = (prefer_format or "JPEG").upper()
+        if fmt not in {"PNG", "JPEG", "JPG", "WEBP"}:
+            fmt = "JPEG"
+
+        buf = io.BytesIO()
+        save_kwargs = {}
+        if fmt in {"JPEG", "JPG"}:
+            if image.mode in ("RGBA", "LA"):
+                image = image.convert("RGB")
+            save_kwargs["quality"] = 92
+            save_kwargs["optimize"] = True
+
+        image.save(buf, format="JPEG" if fmt == "JPG" else fmt, **save_kwargs)
+
+        mime = "image/jpeg" if fmt in {"JPEG", "JPG"} else f"image/{fmt.lower()}"
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return f"data:{mime};base64,{b64}"
+
+    def generate_content(self, parts, generation_config=None) -> _OpenRouterResponse:
+        if not isinstance(parts, (list, tuple)) or len(parts) < 2:
+            raise ValueError("generate_content expects [prompt, image]")
+
+        prompt, image = parts[0], parts[1]
+        if not isinstance(prompt, str):
+            raise ValueError("First element must be a prompt string")
+        if not isinstance(image, Image.Image):
+            raise ValueError("Second element must be a PIL.Image.Image")
+
+        # Max output tokens
+        max_tokens = None
+        if generation_config is not None:
+            if isinstance(generation_config, dict):
+                max_tokens = generation_config.get("max_output_tokens")
+            else:
+                max_tokens = getattr(generation_config, "max_output_tokens", None)
+        if max_tokens is None:
+            max_tokens = 2048
+
+        max_tokens = int(max_tokens)
+        max_tokens = min(max_tokens, 8192)
+
+        data_url = self._pil_to_data_url(image, prefer_format="JPEG")
+
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ],
+            "max_tokens": max_tokens,
+        }
+
+        resp = self._get_session().post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            json=payload,
+            timeout=120,
+        )
+
+        if resp.status_code >= 400:
+            retry_after = None
+            ra = resp.headers.get("Retry-After")
+            if ra:
+                try:
+                    retry_after = float(ra)  # seconds
+                except Exception:
+                    retry_after = None
+
+            try:
+                err = resp.json()
+            except Exception:
+                err = {"error": resp.text}
+
+            raise OpenRouterAPIError(resp.status_code, err, retry_after=retry_after)
+
+        try:
+            data = resp.json()
+        except Exception as e:
+            raise RuntimeError(f"Invalid JSON response: {e} | body={resp.text[:500]}")
+
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except Exception:
+            raise RuntimeError(f"Unexpected OpenRouter response shape: {data}")
+
+        if isinstance(content, list):
+            chunks = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    chunks.append(item.get("text", ""))
+                elif isinstance(item, str):
+                    chunks.append(item)
+            content = "\n".join([c for c in chunks if c is not None])
+
+        return _OpenRouterResponse(text=str(content or ""))
+
+
+# ============================================================
+# Image prep + PDF render
+# ============================================================
+
+try:
+    _LANCZOS = Image.Resampling.LANCZOS  # Pillow >= 10
+except Exception:
+    _LANCZOS = Image.LANCZOS
+
+
+def _prepare_image_for_ocr(img: Image.Image,
+                           max_pixels: int = 40_000_000,
+                           max_side: int = 8000) -> Image.Image:
+    """Downscale only if needed to keep images OCR-friendly and avoid huge payloads."""
+    w, h = img.size
+    pixels = w * h
+    scale = 1.0
+
+    if pixels > max_pixels:
+        scale = min(scale, (max_pixels / float(pixels)) ** 0.5)
+
+    longest = max(w, h)
+    if longest * scale > max_side:
+        scale = min(scale, max_side / float(longest))
+
+    if scale < 1.0:
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        img = img.resize((new_w, new_h), resample=_LANCZOS)
+
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+
+    return img
+
+
+def _render_pdf_page_to_pil(pdf_path: str, page_index_0_based: int, zoom: float) -> Image.Image:
+    """
+    Render a single PDF page to a PIL image.
+    Opens the PDF inside the function to avoid cross-thread document use.
+    """
+    doc = fitz.open(pdf_path)
+    try:
+        page = doc.load_page(page_index_0_based)
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, alpha=False)  # alpha=False -> RGB
+        return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    finally:
+        doc.close()
+
+
+# ============================================================
+# Legacy utility functions (kept for drop-in compatibility)
+# ============================================================
+
+def pdf_to_images(pdf_path: str, output_folder: str, book_name: str, zoom: float = 4.0) -> None:
+    """Convert PDF pages to JPEG images."""
+    os.makedirs(output_folder, exist_ok=True)
+    doc = fitz.open(pdf_path)
+    try:
+        for page_number in range(len(doc)):
+            page = doc.load_page(page_number)
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            img = _prepare_image_for_ocr(img)
+            image_filename = f"{book_name}_{page_number + 1}.jpg"
+            image_path = os.path.join(output_folder, image_filename)
+            img.save(image_path, format="JPEG", quality=92, optimize=True)
+            print(f"Saved {image_path}")
+    finally:
+        doc.close()
+
+
+def process_pdf_range(pdf_path: str,
+                      output_folder: str,
+                      book_name: str,
+                      start_page: int,
+                      end_page,
+                      zoom: float = 4.0):
+    """Convert a range of PDF pages to JPEG images."""
+    os.makedirs(output_folder, exist_ok=True)
+    doc = fitz.open(pdf_path)
+    try:
+        total_pages = len(doc)
+        start_page = max(1, int(start_page))
+
+        if end_page is None or end_page == "ALL" or end_page == "":
+            end_page = total_pages
+        else:
+            try:
+                end_page = int(end_page)
+            except Exception:
+                end_page = total_pages
+            end_page = min(total_pages, end_page)
+
+        start_idx = start_page - 1
+        end_idx = end_page - 1
+
+        for page_number in range(start_idx, end_idx + 1):
+            page = doc.load_page(page_number)
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            img = _prepare_image_for_ocr(img)
+            image_filename = f"{book_name}_{page_number + 1}.jpg"
+            image_path = os.path.join(output_folder, image_filename)
+            img.save(image_path, format="JPEG", quality=92, optimize=True)
+            print(f"Saved {image_path}")
+
+        return start_page, end_page
+    finally:
+        doc.close()
+
+
+# ============================================================
+# OCR pipeline
+# ============================================================
+
+API_CONCURRENCY = int(os.getenv("OPENROUTER_CONCURRENCY", "3"))
+api_sem = threading.Semaphore(max(1, API_CONCURRENCY))
+
+NUM_WORKERS = int(os.getenv("OCR_WORKERS", "4"))
+MAX_WORKERS = max(1, min(NUM_WORKERS, API_CONCURRENCY))
+
+RENDER_ZOOM = float(os.getenv("PDF_RENDER_ZOOM", "4"))
+SAVE_RENDERED_IMAGES = os.getenv("SAVE_RENDERED_IMAGES", "0").strip().lower() in ("1", "true", "yes")
+
+
+def process_image(pil_image: Image.Image, output_text_path: str, retries: int = 3) -> None:
+    """
+    OCR a PIL image and write its text to output_text_path (atomic).
+    Retries on transient OpenRouter / network errors with backoff + jitter.
+    """
+    last_err: Optional[BaseException] = None
+    image = _prepare_image_for_ocr(pil_image)
+
+    for attempt in range(1, retries + 1):
+        try:
+            with api_sem:
+                response = model.generate_content([OCR_PROMPT, image], generation_config=gen_conf)
+
+            extracted_text = response.text or ""
+            _atomic_write_text(output_text_path, extracted_text, encoding="utf-8")
+            return
+
+        except OpenRouterAPIError as e:
+            last_err = e
+            retryable = e.status_code in (408, 409, 425, 429, 500, 502, 503, 504)
+            if (not retryable) or attempt == retries:
+                break
+
+            if e.retry_after is not None:
+                sleep_s = max(0.5, float(e.retry_after))
+            else:
+                base = 1.5
+                cap = 20.0
+                sleep_s = min(cap, base * (2 ** (attempt - 1))) + random.uniform(0.0, 0.75)
+            time.sleep(sleep_s)
+
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError) as e:
+            last_err = e
+            if attempt == retries:
+                break
+            base = 1.5
+            cap = 20.0
+            sleep_s = min(cap, base * (2 ** (attempt - 1))) + random.uniform(0.0, 0.75)
+            time.sleep(sleep_s)
+
+        except Exception as e:
+            last_err = e
+            if attempt == retries:
+                break
+            base = 1.0
+            cap = 10.0
+            sleep_s = min(cap, base * (2 ** (attempt - 1))) + random.uniform(0.0, 0.5)
+            time.sleep(sleep_s)
+
+    raise RuntimeError(f"OCR failed after {retries} attempts. Last error: {last_err}")
+
+
+def ocr_pdf_page(pdf_path: str,
+                 base_name: str,
+                 page_num_1_based: int,
+                 img_folder: str,
+                 txt_folder: str,
+                 zoom: float,
+                 retries: int = 3) -> None:
+    """Render+OCR a single page, writing text atomically."""
+    output_text_path = os.path.join(txt_folder, f"{base_name}_{page_num_1_based}.txt")
+    if not _needs_ocr(output_text_path):
+        return
+
+    print(f"OCR page {page_num_1_based} ...")
+    pil_img = _render_pdf_page_to_pil(pdf_path, page_num_1_based - 1, zoom=zoom)
+
+    if SAVE_RENDERED_IMAGES:
+        os.makedirs(img_folder, exist_ok=True)
+        img_path = os.path.join(img_folder, f"{base_name}_{page_num_1_based}.jpg")
+        _prepare_image_for_ocr(pil_img).save(img_path, format="JPEG", quality=92, optimize=True)
+
+    process_image(pil_img, output_text_path=output_text_path, retries=retries)
+    print(f"Done page {page_num_1_based}")
+
+
+# ============================================================
+# Post-processing
+# ============================================================
+
+def clean_unnecessary_linebreaks(text: str) -> str:
+    """
+    1) Preserves page separators (=== Page X ===)
+    2) Keeps line breaks only when previous line ends with '.' or ':'
+    3) Removes other line breaks within pages by merging with a space
+    """
+    lines = text.split("\n")
+    cleaned = []
+
+    def _keep_break(prev_line: str) -> bool:
+        prev = prev_line.rstrip()
+        return prev.endswith(".") or prev.endswith(":")
+
+    for i, line in enumerate(lines):
+        if line.startswith("=== Page"):
+            cleaned.append(line)
+            if i + 1 < len(lines) and lines[i + 1].strip() == "":
+                cleaned.append("")
+            continue
+
+        if i > 0 and not lines[i - 1].startswith("=== Page") and not _keep_break(lines[i - 1]):
+            if cleaned and cleaned[-1] != "":
+                cleaned[-1] = cleaned[-1].rstrip() + " " + line.lstrip()
+            else:
+                cleaned.append(line)
+        else:
+            cleaned.append(line)
+
+    return "\n".join(cleaned)
+
+
+
+def ocr_pdf_interface(pdf_file, start_page, end_page):
+    try:
+        pdf_path = pdf_file.name
+        base_name = os.path.splitext(os.path.basename(pdf_path))[0]
+
+        img_folder = f"tempo_{base_name}"
+        txt_folder = f"tempo_res_{base_name}"
+        os.makedirs(txt_folder, exist_ok=True)
+        if SAVE_RENDERED_IMAGES:
+            os.makedirs(img_folder, exist_ok=True)
+
+        # total pages
+        doc = fitz.open(pdf_path)
+        try:
+            total_pages = len(doc)
+        finally:
+            doc.close()
+
+        sp = max(1, _int_from_gradio_number(start_page, default=1))
+
+        if end_page in [None, "ALL", ""]:
+            ep = total_pages
+        else:
+            try:
+                ep = int(str(end_page).strip())
+            except Exception:
+                ep = total_pages
+            ep = min(total_pages, ep)
+
+        if sp > ep:
+            sp, ep = ep, sp
+
+        pages = list(range(sp, ep + 1))
+
+        # schedule only needed pages
+        to_run = []
+        skipped = 0
+        for p in pages:
+            out_path = os.path.join(txt_folder, f"{base_name}_{p}.txt")
+            if _needs_ocr(out_path):
+                to_run.append(p)
+            else:
+                skipped += 1
+
+        print(f"Selected pages: {sp}-{ep} | to OCR: {len(to_run)} | skipped (cached): {skipped}")
+        if to_run:
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+                futs = {
+                    ex.submit(ocr_pdf_page, pdf_path, base_name, p, img_folder, txt_folder, RENDER_ZOOM): p
+                    for p in to_run
+                }
+                for fut in as_completed(futs):
+                    p = futs[fut]
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        print(f"Page {p} failed: {e}")
+                        out_path = os.path.join(txt_folder, f"{base_name}_{p}.txt")
+                        if _needs_ocr(out_path):
+                            _atomic_write_text(out_path, f"[OCR failed for this page: {e}]\n")
+
+        # combine
+        combined = []
+        for p in pages:
+            text_path = os.path.join(txt_folder, f"{base_name}_{p}.txt")
+            if os.path.exists(text_path):
+                with open(text_path, "r", encoding="utf-8") as f:
+                    combined.append(f"=== Page {p} ===\n{f.read()}\n")
+            else:
+                combined.append(f"=== Page {p} ===\n[OCR failed for this page]\n")
+
+        raw = "\n".join(combined)
+        #return clean_unnecessary_linebreaks(raw)
+        return raw
+
+    except Exception as e:
+        return f"Error during processing: {e}"
+
+
+# ============================================================
+# Configuration + prompt
+# ============================================================
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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").strip()
+if not OPENROUTER_API_KEY:
+    raise RuntimeError("Missing OPENROUTER_API_KEY environment variable")
+
+model_name = os.getenv("OPENROUTER_MODEL", "google/gemini-2.0-flash-001")
+YOUR_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "http://localhost")
+YOUR_SITE_NAME = os.getenv("OPENROUTER_SITE_NAME", "PDF OCR")
+
+model = OpenRouterGenerativeModel(
+    model_name=model_name,
+    api_key=OPENROUTER_API_KEY,
+    referer=YOUR_SITE_URL,
+    title=YOUR_SITE_NAME,
+)
+
+class GenerationConfig:
+    def __init__(self, max_output_tokens: int):
+        self.max_output_tokens = max_output_tokens
+
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
+gen_conf = GenerationConfig(max_output_tokens=MAX_OUTPUT_TOKENS)
+
+OCR_PROMPT = """# Image Text Extraction Prompt
+
+## Objective
+
+Extract all visible text from the image with high fidelity to the original content.
+
+## Text Representation Guidelines
+
+### Plain Text
+
+* Transcribe all visible text precisely as it appears.
+* Minimize unnecessary line breaks:
+
+  * Preserve line breaks only when they clearly indicate the end of a sentence (e.g., a period followed by a new line).
+  * Otherwise, produce clean and continuous paragraphs.
+
+### Tables
+
+* Represent all tables using Markdown table syntax.
+* Preserve the table’s structure, alignment, and headers as accurately as possible.
+
+## Layout and Formatting Preservation
+
+### Structure
+
+* Reconstruct the logical and visual structure of the original content.
+* When clear sections, subsections, or subsubsections are visually or typographically indicated, convert them using:
+  * # for sections
+  * ## for subsections
+  * ### for subsubsections
+
+### Header Formatting Rules
+
+* Only use headers when they denote true structural divisions.
+* Do not use headers for mere itemized lists, figure labels, or emphasized phrases.
+* Retain original title hierarchy and nesting where visually or contextually evident.
+* Do not include top-of-page running headers that are not part of the main document content.
+
+## Fidelity
+
+* Preserve indentation, bullet points, and numbered lists when present in the original layout.
+* Emphasize textual elements only if clearly used for hierarchy or emphasis in the source.
+* Preserve any separating horizontal line exactly as it appears in the source document.
+* DO NOT TRANSLATE OR INTERPRET!!! YOU NEED TO EXTRACT THE TEXT EXACTLY AS IT APPEARS.
+
+
+## Special Cases
+
+* If the page is a table of contents, do not process it — skip OCR for that page.
+
+## Presence of diagrams
+
+In many cases there are diagrams, please try to write a text that reflects the ideas behind these diagrams.
+"""
+
+
+
+
+######
+
+C:\Users\Abderrahman\Desktop\new_legal_ai\backend_BO\app\ingestion\__init__.py
+
+# app/ingestion/__init__.py
+
+######
+
