@@ -1,0 +1,71 @@
+{
+  "additionalProperties": false,
+  "description": "The standard record shape passed between ingestion and the generic\ncore. Every project's ingestion pipeline (custom layer) must produce\na list of these, or something that validates as one, before anything\nin core/ touches the data.",
+  "properties": {
+    "id": {
+      "description": "Unique identifier for this record within its corpus. Uniqueness is enforced across a batch by validate_document_batch() in metadata_types.py, not by this model in isolation (a single record can't know about its siblings).",
+      "minLength": 1,
+      "title": "Id",
+      "type": "string"
+    },
+    "text": {
+      "description": "Searchable textual content. Empty string is allowed (e.g. a record that exists for metadata/filtering purposes only) \u2014 but the field must be present; use '' explicitly, never omit it.",
+      "title": "Text",
+      "type": "string"
+    },
+    "metadata": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "description": "Flat key -> scalar | list[scalar] map. No nested objects. Values are untyped JSON scalars at this level; project-declared typing and validation happens in metadata_types.py.",
+      "title": "Metadata",
+      "type": "object"
+    }
+  },
+  "required": [
+    "id",
+    "text"
+  ],
+  "title": "DocumentRecord",
+  "type": "object",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://internal/schemas/document-record.schema.json"
+}
