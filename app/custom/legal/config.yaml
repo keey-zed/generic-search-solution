@@ -1,0 +1,74 @@
+# app/custom/legal/config.yaml
+#
+# Reference example for the v0 config schema (app/core/config/models.py).
+# Validate with:
+#   PYTHONPATH=. python3 -c "from app.core.config import load_use_case_config; print(load_use_case_config('app/custom/legal/config.yaml'))"
+
+schema_version: 1
+
+filters:
+  document_type:
+    type: string
+    required: true
+    operation: equality
+
+  publication_date:
+    type: date
+    required: false
+    operation: range
+
+  promulgation_date:
+    type: date
+    required: false
+    operation: range
+
+  subjects:
+    type: list
+    item_type: string
+    required: false
+    operation: contains
+
+  title:
+    type: string
+    required: false
+    operation: contains
+
+search:
+  semantic:
+    enabled: true
+    multi_query_combination: max_score
+  lexical:
+    enabled: true
+  ranking:
+    strategy: weighted_sum
+    weights:
+      semantic: 0.6
+      lexical: 0.4
+  pagination:
+    default_page_size: 20
+    max_page_size: 100
+
+frontend:
+  branding:
+    title: "Legal Document Search"
+    subtitle: "Search justice and legal texts"
+    primary_color: "#1A2B3C"
+    search_placeholder: "Search legal documents..."
+  filters:
+    document_type:
+      label: "Document Type"
+      control: dropdown
+      order: 1
+    publication_date:
+      label: "Publication Date"
+      order: 2
+    subjects:
+      label: "Subjects"
+      order: 3
+    title:
+      label: "Title"
+      order: 4
+      placeholder: "Search by title..."
+    # promulgation_date is intentionally NOT listed here: it's filterable
+    # via the API but not exposed as a UI control in this project.
+  result_card_fields: [document_type, publication_date, title]
