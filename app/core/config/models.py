@@ -1,7 +1,7 @@
 """
 app/core/config/models.py
 
-Phase 0, Deliverable 4: the YAML config schema (v0) every project's
+The YAML config schema (v0) every project's
 `config.yaml` must conform to, with four required top-level keys:
 
     schema_version   int, must be a version this core supports
@@ -9,7 +9,7 @@ Phase 0, Deliverable 4: the YAML config schema (v0) every project's
     search:          generic search/ranking/pagination behavior
     frontend:        presentation layer (branding + per-filter UI overrides)
 
-Design principle carried over from Phase 0's metadata typing layer: this
+Design principle carried over from the metadata typing layer: this
 schema does NOT redeclare field typing rules. `filters.<name>.type` and
 `.item_type` reuse the exact same `MetadataFieldType` enum from
 core/schema/metadata_types.py, and `FilterFieldConfig` validates its

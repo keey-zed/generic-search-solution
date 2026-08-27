@@ -1,7 +1,6 @@
 # Embeddings Interface & Generic SearchHit Schema
 
-This document specifies **Phase 0, Deliverables 2 and 3** of the
-roadmap, building directly on `DocumentRecord` and the typed metadata
+Building directly on `DocumentRecord` and the typed metadata
 layer described in `docs/metadata-typing.md` — read that first if you
 haven't.
 
