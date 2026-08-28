@@ -15,6 +15,16 @@ either.
 PYTHONPATH=. python3 -m pytest tests/test_filters.py tests/test_filtering_registry.py
 ```
 
+Track B's Definition of Done is verified as one end-to-end acceptance
+test in `tests/test_track_b_definition_of_done.py` — a fake YAML config
+and a fake set of raw records run through ingestion, config-driven
+filter construction, and every filter type in one pass, including all
+four named edge cases (missing field, wrong type, empty filter list,
+malformed config). Everything else in this document is covered in more
+depth by the other `tests/test_*.py` files; that one file exists purely
+to demonstrate the whole pipeline working together the way the DoD
+describes it.
+
 ## 1. The shared interface
 
 ```python
