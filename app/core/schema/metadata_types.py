@@ -8,8 +8,8 @@ into typed Python values the filtering engine can safely operate on.
 This is deliberately a SEPARATE layer from DocumentRecord:
   - DocumentRecord (Layer 0) never changes across projects.
   - MetadataFieldDef / MetadataSchema (Layer 1) is supplied per-project,
-    from that project's YAML config (Phase 0 deliverable 4).
-  - The filtering engine (Phase 1, Track B) will only ever see the typed
+    from that project's YAML config.
+  - The filtering engine will only ever see the typed
     output of normalize_metadata() / validate_document_batch(), never
     raw DocumentRecord.metadata directly.
 
@@ -395,7 +395,7 @@ def validate_document_batch(
 # ---------------------------------------------------------------------------
 # 5. Type -> allowed filter operation compatibility matrix
 #
-# This is the contract Phase 1 / Track B's YAML config loader uses to
+# This is the contract the YAML config loader uses to
 # reject a config that pairs an invalid operation with a field type
 # (e.g. `contains` on a BOOL field) at config-load time, per the source
 # doc's requirement that bad configs "fail loudly ... not at query time."

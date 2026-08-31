@@ -1,7 +1,6 @@
 # YAML Config Schema v0
 
-This document specifies **Phase 0, Deliverable 4** of the roadmap: the
-`config.yaml` every project must supply, validated by
+The `config.yaml` every project must supply, validated by
 `app/core/config/models.py` (Pydantic) and loaded via
 `app/core/config/loader.py::load_use_case_config()`.
 
@@ -47,7 +46,7 @@ doing pure semantic/lexical search with no metadata filters is valid).
 ## 2. `filters:` reuses Layer 1's typing, doesn't redeclare it
 
 `type` and `item_type` are the exact same `MetadataFieldType` enum from
-`app/core/schema/metadata_types.py` (Phase 0, Deliverable 1). `operation`
+`app/core/schema/metadata_types.py`. `operation`
 is validated against the exact same `FILTER_OPERATION_COMPATIBILITY`
 matrix used at ingestion — a `contains` filter on a `bool` field is
 rejected by one shared rule, not by two independently-maintained copies
@@ -123,8 +122,7 @@ message naming the field, the bad value, and what's actually allowed.
 ## 4. `search:` — sane defaults, explicit failure modes
 
 - `semantic.multi_query_combination`: `max_score` (default) or
-  `weighted_average` — exactly the two strategies Track A's Phase 1
-  retrieval work is scoped to implement.
+  `weighted_average` — exactly the two strategies retrieval work is scoped to implement.
 - `ranking.strategy`: `weighted_sum` only in v0 (a `Literal` with one
   value — extend deliberately when a second strategy is actually
   needed). `weights` defaults to `{semantic: 0.5, lexical: 0.5}` and is

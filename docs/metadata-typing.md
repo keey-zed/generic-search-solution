@@ -1,7 +1,6 @@
 # Standard Document Schema & Metadata Typing
 
-This document specifies **Phase 0, Deliverable 1** of the roadmap: the
-single standard input format every project's ingestion pipeline must
+The single standard input format every project's ingestion pipeline must
 produce, and how metadata values are typed for filtering.
 
 ## 1. Two layers, on purpose
@@ -111,8 +110,7 @@ that can contradict each other.
 
 **Every declared field is guaranteed to be a key in the normalized
 output**, even when absent from a given record's raw metadata (value
-`None` if optional-and-missing). This means the filtering engine (Phase
-1) can always do `record.metadata["some_declared_field"]` without a
+`None` if optional-and-missing). This means the filtering engine can always do `record.metadata["some_declared_field"]` without a
 `KeyError`, regardless of which records happen to have that field
 populated.
 
@@ -163,7 +161,7 @@ directly per record. It:
 
 ## 5. Type → filter operation compatibility matrix
 
-This is the contract the Phase 1 / Track B YAML config loader uses to
+This is the contract the YAML config loader uses to
 reject an invalid config (e.g. a `contains` operation declared on a
 `BOOL` field) **at config load time**, per the requirement that bad
 configs "fail loudly ... not at query time."
@@ -224,7 +222,4 @@ python scripts/regenerate_json_schema.py
 ```
 
 Run this whenever `app/core/schema/document.py` changes and commit the
-resulting diff. Recommended for Phase 6 (hardening): add a CI step that
-runs the script and fails the build if it produces an uncommitted diff,
-so the checked-in schema can never silently drift from the Pydantic
-model it's supposed to mirror.
+resulting diff. 

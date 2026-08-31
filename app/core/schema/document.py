@@ -15,8 +15,7 @@ DocumentRecord never changes no matter how many projects fork this repo.
 Explicit non-goals (do not "fix" these here — see docs/metadata-typing.md
 "Deferred / explicitly out of scope" for the reasoning):
   - No nested objects in metadata (flat key -> scalar | list[scalar] only).
-  - No embeddings field here (see the separate embeddings interface,
-    Phase 0 deliverable 2) — a DocumentRecord is text + metadata only.
+  - No embeddings field here — a DocumentRecord is text + metadata only.
   - No per-field typing at this level — that's metadata_types.py's job.
 """
 from __future__ import annotations

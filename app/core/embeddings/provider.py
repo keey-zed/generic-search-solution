@@ -3,7 +3,7 @@ app/core/embeddings/provider.py
 
 The standard interface retrieval calls to obtain a document's embedding.
 
-Conceptually (source doc's Phase 0 deliverable 2):
+Conceptually :
 
     Retrieval -> EmbeddingProvider -> InlineEmbeddingProvider -> EmbeddedDocumentRecord   (V1, this file)
                                     -> (future) a separate embeddings store / vector DB    (not built yet)
