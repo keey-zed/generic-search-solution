@@ -1,0 +1,84 @@
+# app/custom/_template/config.yaml
+#
+# STEP 1 of adopting this template for a new project: replace everything
+# below with YOUR project's fields, search settings, and branding. Every
+# key here is explained inline so you shouldn't need to read core source
+# to fill this in -- see docs/custom-layer-template.md for the field-type
+# / operation reference if something's unclear.
+#
+# Validate it any time with:
+#   PYTHONPATH=. python3 -c "from app.core.config import load_use_case_config; print(load_use_case_config('app/custom/<your-project>/config.yaml'))"
+# A bad (type, operation) pairing (e.g. 'contains' on an 'int' field) is
+# rejected immediately, with a message naming the field and what IS
+# allowed -- see docs/filtering.md.
+
+schema_version: 1
+
+# One entry per metadata field you want to be filterable. The field name
+# here (e.g. "category") is what `SearchRequest.filters` keys must match,
+# and what a custom filter override (custom_filters.py) is keyed by.
+filters:
+  # EXAMPLE: a string field with exact-match filtering.
+  category:
+    type: string          # string | date | int | float | bool | list
+    required: true         # true: every ingested record must have this field
+    operation: equality    # equality | range | contains -- see the
+                            # type -> allowed-operations table in
+                            # docs/filtering.md before picking one
+
+  # EXAMPLE: a date field with range filtering (from/to).
+  release_date:
+    type: date
+    required: false
+    operation: range
+
+  # EXAMPLE: a list-of-strings field with membership filtering
+  # ("contains ANY of these values"). `item_type` is required for `list`
+  # fields -- it's the type of each element.
+  tags:
+    type: list
+    item_type: string
+    required: false
+    operation: contains
+
+# Delete every example field above and replace with your own. A project
+# with zero filterable fields is valid (an empty `filters: {}` mapping)
+# but unusual -- most projects declare at least one.
+
+search:
+  semantic:
+    enabled: true                          # turn off if this project has no embeddings
+    multi_query_combination: max_score      # how multiple semantic queries in one request combine
+  lexical:
+    enabled: true                          # boolean/substring text search
+  ranking:
+    strategy: weighted_sum                  # how semantic + lexical hits are merged/ordered
+    weights:
+      semantic: 0.6
+      lexical: 0.4
+  pagination:
+    default_page_size: 20
+    max_page_size: 100
+
+frontend:
+  branding:
+    title: "Replace With Your Project Title"
+    subtitle: "Replace with a short subtitle"
+    primary_color: "#1A2B3C"
+    search_placeholder: "Search..."
+  filters:
+    # Optional: control how each filter renders in the UI (label, widget,
+    # display order, placeholder). A field declared under `filters:`
+    # above but NOT listed here is still filterable via the API, just
+    # not exposed as a UI control -- useful for internal/advanced filters.
+    category:
+      label: "Category"
+      control: dropdown
+      order: 1
+    release_date:
+      label: "Release Date"
+      order: 2
+    tags:
+      label: "Tags"
+      order: 3
+  result_card_fields: [category, release_date]
