@@ -72,6 +72,43 @@ call this once at startup and hand the result to `normalize_metadata()` /
 `validate_document_batch()`. There is exactly one place a field's type is
 declared; config and ingestion both read from it.
 
+### `default:` — optional default filter value (§5)
+
+> §5 lists "default values, where applicable" among what
+> `config.yaml` should be able to specify; `FilterFieldConfig` didn't
+> support it until this was added.
+
+```yaml
+filters:
+  doctype:
+    type: string
+    operation: equality
+    default: dahir                          # single value, or a list for OR
+
+  publication_date:
+    type: date
+    operation: range
+    default:
+      min: "2020-01-01"                     # same {min,max,min_inclusive,max_inclusive}
+                                             # shape RangeFilter's params take
+```
+
+`default` is validated exactly like any other value in this project —
+scalar values go through `metadata_types._coerce_scalar`, the same
+per-type rules (strict ISO-8601 dates, the `bool`-is-not-`int` trap,
+...) ingestion applies to a record's own metadata. A `range` default
+must be a mapping using only `min`/`max`/`min_inclusive`/`max_inclusive`
+keys; an `equality`/`contains` default is a scalar or list of scalars
+(OR semantics) — i.e. exactly the shape a `Filter.apply()` call's
+`params` argument would accept for that field (`docs/filtering.md` §3).
+
+**Scope, stated plainly**: this only validates that `default` is
+well-typed. Whether/how a default is actually *applied* — a UI
+pre-filling a filter control's initial state vs. the orchestrator
+silently constraining a request that omits the field — is deliberately
+left unspecified here. That's a decision for whatever consumes this
+config (frontend or orchestrator), not for the schema layer.
+
 ## 3. `frontend:` — opt-in exposure, not opt-out
 
 A field declared under `filters:` is **not** automatically shown in the

@@ -1,0 +1,73 @@
+# app/custom/books/config.yaml
+#
+# The Book Search example from the source doc (§4, §9, §11): the second
+# reference project alongside app/custom/legal/, demonstrating the SAME
+# generic core producing a completely different-looking application
+# through configuration + custom layer alone.
+#
+# Field list follows source doc §9's book-search example: title, author,
+# publication year, volume, chapter, subject, source collection. Not all
+# of those are declared as filters here -- only the ones worth
+# demonstrating; a real deployment would fill in the rest the same way.
+
+schema_version: 1
+
+filters:
+  title:
+    type: string
+    required: true
+    operation: contains   # overridden with fuzzy matching -- see custom_filters.py
+
+  author:
+    type: string
+    required: true
+    operation: equality
+
+  publication_year:
+    type: int
+    required: false
+    operation: range
+
+  subjects:
+    type: list
+    item_type: string
+    required: false
+    operation: contains
+
+search:
+  semantic:
+    enabled: true
+    multi_query_combination: max_score
+  lexical:
+    enabled: true
+  ranking:
+    strategy: weighted_sum
+    weights:
+      semantic: 0.6
+      lexical: 0.4
+  pagination:
+    default_page_size: 20
+    max_page_size: 100
+
+frontend:
+  branding:
+    title: "Book Search"
+    subtitle: "Search the collection"
+    primary_color: "#3C2A1A"
+    search_placeholder: "Search by title, author, or subject..."
+  filters:
+    title:
+      label: "Title"
+      order: 1
+      placeholder: "e.g. Al-Tabaqat al-Kubra"
+    author:
+      label: "Author"
+      control: dropdown
+      order: 2
+    publication_year:
+      label: "Publication Year"
+      order: 3
+    subjects:
+      label: "Subject"
+      order: 4
+  result_card_fields: [title, author, publication_year]

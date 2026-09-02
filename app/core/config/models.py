@@ -29,7 +29,7 @@ source of truth.
 from __future__ import annotations
 
 import re
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -38,6 +38,7 @@ from app.core.schema.metadata_types import (
     MetadataFieldDef,
     MetadataFieldType,
     MetadataSchema,
+    _coerce_scalar,
     is_operation_compatible,
 )
 
@@ -64,8 +65,9 @@ FilterOperation = Literal["equality", "range", "contains"]
 
 class FilterFieldConfig(BaseModel):
     """One entry under `filters:` — the backend truth for one metadata
-    field: its type, whether it's required at ingestion, and which
-    generic filter operation (source doc §3) it exposes."""
+    field: its type, whether it's required at ingestion, which generic
+    filter operation (source doc §3) it exposes, and an optional default
+    filter value (source doc §5: "default values, where applicable")."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -73,6 +75,24 @@ class FilterFieldConfig(BaseModel):
     item_type: Optional[MetadataFieldType] = None
     required: bool = False
     operation: FilterOperation
+    default: Optional[Any] = Field(
+        default=None,
+        description=(
+            "An optional default filter value/params for this field, in "
+            "exactly the shape Filter.apply()'s `params` argument would "
+            "accept for this field's declared operation: a single scalar "
+            "or list of scalars for 'equality'/'contains', or a "
+            "{'min':..., 'max':...} mapping for 'range'. Validated the "
+            "same way ingestion validates a record's own value for this "
+            "type (see _coerce_scalar below) -- a default value held to "
+            "a looser standard than a real value would be a wire-format "
+            "inconsistency this project otherwise never allows. This is "
+            "declarative config only: whether/how a default is applied "
+            "(pre-filling a UI control vs. an implicit query constraint) "
+            "is left to whatever consumes this config -- see "
+            "docs/config-schema.md."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_shape_and_operation(self) -> "FilterFieldConfig":
@@ -95,7 +115,61 @@ class FilterFieldConfig(BaseModel):
                 f"operation '{self.operation}' is not compatible with type '{self.type.value}' "
                 f"(allowed operations for this type: {allowed})"
             )
+
+        if self.default is not None:
+            self._validate_default()
+
         return self
+
+    def _validate_default(self) -> None:
+        """`default` must be a legal value for this field's declared
+        operation -- exactly the shape a Filter's `params` argument would
+        accept (see app/core/filtering/filters.py / docs/filtering.md
+        §3). Scalar values are coerced with the exact same
+        `_coerce_scalar` rules ingestion applies to a record's own
+        metadata value (docs/filtering.md §4: "type coercion ... done
+        once, centrally") -- a default is held to the same
+        type-correctness standard as any other value in this project,
+        not a separately maintained one.
+        """
+        scalar_type = self.item_type if self.type == MetadataFieldType.LIST else self.type
+
+        if self.operation == "range":
+            if not isinstance(self.default, dict):
+                raise ValueError(
+                    f"default for a 'range' field must be a mapping with 'min'/'max' "
+                    f"keys (e.g. {{'min': ..., 'max': ...}}), got "
+                    f"{type(self.default).__name__}"
+                )
+            allowed_keys = {"min", "max", "min_inclusive", "max_inclusive"}
+            unknown_keys = set(self.default) - allowed_keys
+            if unknown_keys:
+                raise ValueError(
+                    f"default for a 'range' field has unknown key(s) {sorted(unknown_keys)} "
+                    f"(allowed: {sorted(allowed_keys)})"
+                )
+            for bound_key in ("min", "max"):
+                bound_value = self.default.get(bound_key)
+                if bound_value is not None:
+                    self._coerce_default_scalar(bound_value, scalar_type)
+            for flag_key in ("min_inclusive", "max_inclusive"):
+                if flag_key in self.default and not isinstance(self.default[flag_key], bool):
+                    raise ValueError(f"default['{flag_key}'] must be a boolean")
+        else:
+            # equality / contains: a single scalar, or a list of scalars (OR).
+            values = self.default if isinstance(self.default, list) else [self.default]
+            if not values:
+                raise ValueError(
+                    "default must not be an empty list -- omit `default` entirely "
+                    "for 'no default value' instead"
+                )
+            for value in values:
+                self._coerce_default_scalar(value, scalar_type)
+
+    def _coerce_default_scalar(self, value: object, expected_type: MetadataFieldType) -> None:
+        _, error = _coerce_scalar(value, expected_type, "default")
+        if error is not None:
+            raise ValueError(f"default value {value!r} is invalid for type '{expected_type.value}': {error}")
 
 
 # ---------------------------------------------------------------------------
