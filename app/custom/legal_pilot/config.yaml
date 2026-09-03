@@ -1,0 +1,94 @@
+# app/custom/legal_pilot/config.yaml
+#
+# Pilot use case (roadmap "First reference/pilot use case").
+# Distinct from app/custom/legal/, which is the worked example of the
+# custom-layer TEMPLATE (kept small on purpose, and load-bearing for
+# tests/test_custom_layer_template.py). This project instead validates
+# genericity against the full field set the source doc's running example
+# calls for (§4): publication date, promulgation date, document type,
+# issuing authority, legal status.
+#
+# Validate with:
+#   PYTHONPATH=. python3 -c "from app.core.config import load_use_case_config; print(load_use_case_config('app/custom/legal_pilot/config.yaml'))"
+
+schema_version: 1
+
+filters:
+  document_type:
+    type: string
+    required: true
+    operation: equality
+
+  publication_date:
+    type: date
+    required: false
+    operation: range
+
+  promulgation_date:
+    type: date
+    required: false
+    operation: range
+
+  issuing_authority:
+    type: string
+    required: false
+    operation: equality
+
+  legal_status:
+    type: string
+    required: true
+    operation: equality
+
+  # Not one of the five required filters, but declared anyway to prove
+  # a second field can share the STRING type with a different operation
+  # (contains vs. equality) purely via config, per §3/§9.
+  title:
+    type: string
+    required: false
+    operation: contains
+
+search:
+  semantic:
+    enabled: true
+    multi_query_combination: max_score
+  lexical:
+    enabled: true
+  ranking:
+    strategy: weighted_sum
+    weights:
+      semantic: 0.6
+      lexical: 0.4
+  pagination:
+    default_page_size: 20
+    max_page_size: 100
+
+frontend:
+  branding:
+    title: "Recherche des Textes Juridiques"
+    subtitle: "Dahirs, décrets, lois et arrêtés publiés au Bulletin Officiel"
+    primary_color: "#0B3D2E"
+    search_placeholder: "Rechercher un texte juridique (ex: protection des données, marchés publics...)"
+  filters:
+    publication_date:
+      label: "Date de publication"
+      order: 1
+    promulgation_date:
+      label: "Date de promulgation"
+      order: 2
+    document_type:
+      label: "Type de texte"
+      control: dropdown
+      order: 3
+    issuing_authority:
+      label: "Autorité émettrice"
+      control: dropdown
+      order: 4
+    legal_status:
+      label: "Statut juridique"
+      control: dropdown
+      order: 5
+    title:
+      label: "Titre du texte"
+      order: 6
+      placeholder: "Rechercher dans le titre..."
+  result_card_fields: [document_type, legal_status, publication_date, title]
