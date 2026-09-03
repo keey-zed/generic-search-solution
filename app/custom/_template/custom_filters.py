@@ -9,9 +9,11 @@ ContainsFilter) isn't quite right for your project.
 Most projects need ZERO custom filters -- leave CUSTOM_FILTERS empty and
 skip this file entirely. Only add an entry here once you've confirmed
 the generic filters genuinely can't do what you need; see
-docs/custom-vs-generic.md for the promotion rule (Phase 3, item 3) once
-that doc exists, and see app/custom/legal/README-fuzzy-title.md (Phase
-3, item 2) for a real worked example once that lands.
+docs/custom-vs-generic.md for the promotion rule (when something should
+move from here into app/core/filtering/ instead) and
+app/custom/books/fuzzy_title_filter.py /
+app/custom/legal/case_insensitive_equality_filter.py for two real,
+complete worked examples.
 
 The registration pattern -- this IS the entire mechanism, no decorators,
 no global state (see app/core/filtering/config_loader.py's module

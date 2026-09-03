@@ -17,11 +17,13 @@ This file proves the template is real, not just documentation:
      bootstrap.py) -- produces a working `SearchEngine` that correctly
      filters, searches, ranks, and paginates real (if small) data, with
      zero project-specific code anywhere under app/core/ or app/api/.
-     Registers zero custom filters -- the generic behavior is correct
-     for every field it declares. app/custom/books/ (Phase 3 item 2)
-     demonstrates the "some fields overridden" case instead, per the
-     source doc's own §4/§11 example -- see
-     tests/test_fuzzy_title_filter.py.
+     Registers one custom filter (case-insensitive document_type
+     matching -- see docs/custom-vs-generic.md and
+     tests/test_case_insensitive_equality_filter.py, which is also the
+     literal proof for Phase 3's overall Definition of Done). app/custom/books/
+     (Phase 3 item 2) demonstrates a second, independent override
+     (fuzzy title matching) on a different project entirely, per the
+     source doc's own §4/§11 example.
 
 None of this test file imports anything project-specific from app/core/
 or app/api/ that isn't already part of the public API those layers
@@ -198,17 +200,18 @@ def test_legal_project_no_results_is_not_an_error(legal_engine):
     assert page.hits == []
 
 
-def test_legal_project_custom_filters_map_is_empty_and_still_works(legal_engine):
-    """Confirms an empty CUSTOM_FILTERS (the "this project needs no
-    overrides" case) is a fully supported, non-degenerate state -- not
-    just "technically allowed". The real "some fields overridden" case
-    is demonstrated by app/custom/books/ instead (fuzzy title matching,
-    Phase 3 item 2) -- see tests/test_fuzzy_title_filter.py; per the
-    source doc's own §4/§11 example, that override belongs to the book
-    application, not legal."""
+def test_legal_project_custom_filters_map_has_one_override(legal_engine):
+    """As of this deliverable (Phase 3's DoD proof), legal registers
+    exactly one override ("document_type" -> CaseInsensitiveEqualityFilter,
+    see tests/test_case_insensitive_equality_filter.py for dedicated
+    coverage). The "zero overrides" case is still exercised directly by
+    test_registration_pattern_custom_filter_wired_through_search_engine
+    above, which builds its own throwaway project with an empty
+    CUSTOM_FILTERS -- so both states (some fields overridden, zero
+    fields overridden) are covered somewhere in this suite."""
     from app.custom.legal.custom_filters import CUSTOM_FILTERS
 
-    assert CUSTOM_FILTERS == {}
+    assert set(CUSTOM_FILTERS.keys()) == {"document_type"}
     request = SearchRequest(lexical=LexicalQuery(mandatories=["loi"]))
     page = legal_engine.search(request)
     assert page.total_hits > 0

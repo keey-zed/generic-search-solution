@@ -40,8 +40,7 @@ return nothing for whichever spelling isn't the one stored in the
 catalog. `FuzzyTitleContainsFilter` tolerates that variance instead of
 requiring a byte-perfect match.
 
-This is also the concrete worked example for the (not-yet-written,
-Phase 3 item 3) "custom vs. generic" promotion doc's rule of thumb,
+This is also the concrete worked example for `docs/custom-vs-generic.md`'s rule of thumb,
 directly from §4's own words: "If we later realize that fuzzy matching
 is useful across many applications, we can promote it into the generic
 core." This filter starts out books-specific *on purpose* -- if a second

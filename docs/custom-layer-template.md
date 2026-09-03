@@ -30,7 +30,8 @@ app/custom/
 ├── legal/                   <- a project built BY FOLLOWING the template
 │   ├── config.yaml           real (pre-existing) legal field declarations
 │   ├── raw_loader.py         a small embedded sample dataset
-│   ├── custom_filters.py     empty (this project needs no overrides)
+│   ├── custom_filters.py     ONE override: document_type -> case-insensitive
+│   ├── case_insensitive_equality_filter.py   Phase 3 DoD proof filter
 │   └── bootstrap.py          copied from the template, unmodified
 │
 └── books/                   <- the second project, source doc's own §4/§11 example
@@ -43,17 +44,23 @@ app/custom/
 ```
 
 `app/custom/legal/` and `app/custom/books/` together are the proof the
-template is real, not just documentation:
-`tests/test_custom_layer_template.py` and
-`tests/test_fuzzy_title_filter.py` build a `SearchEngine` from each and
-run real searches against them — using nothing but the four/five-file
-pattern above, with zero project-specific code anywhere in `app/core/`
-or `app/api/`. Between the two, they demonstrate both ends of the
-override spectrum: legal needs zero custom filters (the generic default
-is correct as-is), books needs exactly one (fuzzy title matching) —
-matching the source doc's own architecture diagram (§11): `Legal Search
-→ Custom filters` (unspecified/none needed yet) vs. `Book Search → Fuzzy
-title`.
+template is real, not just documentation: `tests/test_custom_layer_template.py`,
+`tests/test_fuzzy_title_filter.py`, and
+`tests/test_case_insensitive_equality_filter.py` build a `SearchEngine`
+from each and run real searches against them — using nothing but the
+four/five-file pattern above, with zero project-specific code anywhere
+in `app/core/` or `app/api/`. Between the two projects, they demonstrate
+two independent custom overrides, each following
+`docs/custom-vs-generic.md`'s decision procedure for why it belongs in
+the custom layer rather than being promoted.
+
+See `docs/custom-vs-generic.md` for Phase 3 item 3 — when something
+belongs in `custom_filters.py` vs. being promoted into
+`app/core/filtering/` — and for the literal proof of Phase 3's overall
+Definition of Done ("a new filter can be added by a third developer,
+following only the template and doc, without reading core source code,
+and it passes a test"): `app/custom/legal/case_insensitive_equality_filter.py`
+was written using only the template's README and that doc.
 
 ## The registration pattern, in one sentence
 
@@ -69,14 +76,8 @@ addition") for the underlying `generic default -> use-case configuration
 
 ## What's deliberately not built here
 
-- **The custom-vs-generic promotion rule doc.** Phase 3, item 3 — this
-  document doesn't attempt to codify when something belongs in
-  `custom_filters.py` vs. being promoted into `app/core/filtering/`.
-  `app/custom/legal/fuzzy_title_filter.py`'s module docstring previews
-  the rule of thumb (a second project independently needing the same
-  thing is the promotion signal) but the dedicated doc isn't written yet.
 - **A full documentation pass** (architecture diagram, config schema
   reference, filter type reference). That's Phase 6.
 
-For the real custom filter example (Phase 3, item 2 — fuzzy title
-matching), see `docs/fuzzy-title-filter.md`.
+See `docs/fuzzy-title-filter.md` (Phase 3, item 2) and
+`docs/custom-vs-generic.md` (Phase 3, item 3) for the rest of Phase 3.

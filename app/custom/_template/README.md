@@ -47,7 +47,7 @@ unchanged.
   in core (fix it generically, benefiting every project), or it's a
   missing generic feature (add it generically, not as a one-off patch).
   This is the promotion rule from the roadmap's §4 — see
-  `docs/custom-vs-generic.md` (Phase 3, item 3) once that doc exists.
+  `docs/custom-vs-generic.md` for the concrete decision procedure.
 
 ## What this template does NOT include
 
