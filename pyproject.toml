@@ -1,7 +1,57 @@
 [project]
-name = "backend-bo"
+name = "generic-search-factory"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reusable search core (semantic + lexical + generic filtering) configured per use case via YAML, per docs/ and the architecture/roadmap notes."
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.11"
+
+# Dependencies of app/core, app/api, app/custom — the generic search
+# factory itself. Deliberately small: the core must stay installable
+# and testable without any of the legacy artisan app's heavy stack
+# (flask, faiss, sentence-transformers, ...). See app/__init__.py for
+# why those are imported lazily instead of living here.
+dependencies = [
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "jsonschema>=4.0",
+]
+
+[project.optional-dependencies]
+# Only needed by app/custom/books (fuzzy title matching).
+fuzzy = [
+    "rapidfuzz>=3.0",
+]
+
+# Only needed to expose a SearchEngine over HTTP (app/api/http.py).
+# Kept separate from the minimal core deps so a project that only
+# needs SearchEngine in-process (a CLI, a notebook, a test) doesn't
+# have to install a web framework.
+http = [
+    "flask>=3.0",
+    "flask-cors>=4.0",
+]
+
+# The legacy "artisan" Flask app still living at app/data_loader.py,
+# app/semantic_engine.py, app/services.py, app/routes.py, run.py.
+# Not a dependency of the generic core — install this group only if
+# you're running the legacy app itself.
+legacy-app = [
+    "flask",
+    "flask-cors",
+    "numpy",
+    "faiss-cpu",
+    "sentence-transformers",
+    "PyMuPDF",
+    "python-docx",
+    "requests",
+    "pillow",
+    "waitress",
+]
+
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

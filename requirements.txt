@@ -1,27 +1,18 @@
-uv init .
-uv venv --python 3.11
-.venv\Scripts\activate
-.venv\Scripts\python -m ensurepip --upgrade
-python -m pip install --upgrade pip
-python -m pip install -U pip setuptools wheel
-python -m pip install numpy
+# Minimal, pinned-range dependencies for the generic search factory
+# (app/core, app/api, app/custom). This mirrors the [project.dependencies]
+# in pyproject.toml; prefer `pip install .` / `uv sync` over this file
+# when possible.
+#
+# The legacy artisan Flask app (app/data_loader.py, app/semantic_engine.py,
+# app/services.py, app/routes.py, run.py) needs a much heavier stack
+# (flask, faiss, sentence-transformers, torch, PyMuPDF, ...). That app is
+# not part of the generic core and is intentionally not listed here.
+# See pyproject.toml's `legacy-app` optional dependency group instead.
 
-pip install torch==2.7.0+cu128 torchvision==0.22.0+cu128 torchaudio==2.7.0+cu128 --index-url https://download.pytorch.org/whl/cu128
-
-pip install fuzzywuzzy python-Levenshtein
-pip install rapidfuzz
-
-pip install -U sentence-transformers
-pip install -U faiss-cpu
-pip install einops
-
-pip install PyMuPDF
-pip install python-docx
-pip install pywin32
-pip install requests
-
-pip install flask numpy flask_cors python-dotenv scipy
-pip install waitress
-pip install pillow
-pip install pyinstaller
-python -m PyInstaller --onefile --noconsole docopen_handler.py
+pydantic>=2.0
+pyyaml>=6.0
+jsonschema>=4.0
+rapidfuzz>=3.0   # only needed for app/custom/books fuzzy title filter
+flask>=3.0       # only needed for app/api/http.py (exposing SearchEngine over HTTP)
+flask-cors>=4.0  # only needed for app/api/http.py's CORS support
+pytest>=8.0      # for running tests/
