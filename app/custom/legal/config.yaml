@@ -37,6 +37,14 @@ search:
   semantic:
     enabled: true
     multi_query_combination: max_score
+    embedder:
+      provider: sentence_transformer
+      model: intfloat/multilingual-e5-large
+      document_prefix: "passage: "
+      query_prefix: "query: "
+      # device: cpu           # uncomment to force cpu/cuda/mps; default auto-detects
+      batch_size: 32
+      cache_path: data/embeddings/legal.safetensors
   lexical:
     enabled: true
   ranking:

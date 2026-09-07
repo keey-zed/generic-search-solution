@@ -12,6 +12,7 @@ stack, not just a mock of `SearchEngine.search()`.
 from __future__ import annotations
 
 import random
+from pathlib import Path
 
 import pytest
 
@@ -72,8 +73,8 @@ def test_search_with_lexical_query_returns_200_and_search_result_page_shape(clie
     )
     assert response.status_code == 200
     body = response.get_json()
-    # SearchResultPage's own field set (app/core/search/pagination/engine.py) --
-    # a frontend integrating against this endpoint needs exactly these keys.
+    # The page contract remains stable; per-hit navigation URLs are additive
+    # transport fields supplied by the HTTP adapter.
     assert set(body.keys()) == {
         "hits",
         "page",
@@ -84,6 +85,71 @@ def test_search_with_lexical_query_returns_200_and_search_result_page_shape(clie
         "has_next",
     }
     assert isinstance(body["hits"], list)
+    assert all("document_url" in hit and "source_url" in hit for hit in body["hits"])
+
+
+def test_config_endpoint_exposes_resolved_frontend_contract(client):
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["branding"]["title"] == "Recherche des Textes Juridiques"
+    assert [field["name"] for field in body["filters"]] == [
+        "publication_date",
+        "promulgation_date",
+        "document_type",
+        "issuing_authority",
+        "legal_status",
+        "title",
+    ]
+    assert body["filters"][0]["operation"] == "range"
+    assert body["filters"][0]["control"] == "date_range"
+    assert body["search"] == {"lexical": True, "semantic": True, "semantic_text": False}
+    assert body["pagination"]["max_page_size"] == 100
+
+
+def test_facets_endpoint_exposes_only_visible_filter_data(client):
+    response = client.get("/api/facets")
+    assert response.status_code == 200
+    facets = response.get_json()["filters"]
+    assert set(facets) == {
+        "publication_date",
+        "promulgation_date",
+        "document_type",
+        "issuing_authority",
+        "legal_status",
+        "title",
+    }
+    assert facets["publication_date"]["min"] == "2003-06-06"
+    assert facets["publication_date"]["max"] == "2023-01-26"
+    assert {entry["value"] for entry in facets["document_type"]["values"]} == {
+        "arrete", "dahir", "decret", "loi"
+    }
+    assert facets["title"]["available_count"] == 12
+    assert "values" not in facets["title"]
+
+
+def test_document_endpoint_returns_document_and_navigation_url(client):
+    response = client.get("/api/documents/legal_text_0001")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["id"] == "legal_text_0001"
+    assert "protection des donnees" in body["text"]
+    assert body["document_url"] == "/api/documents/legal_text_0001"
+    assert body["source_url"] is None
+
+
+def test_source_endpoint_is_optional_and_serves_only_through_a_resolver(pilot_engine):
+    app = create_http_app(pilot_engine, source_file_resolver=lambda _document: Path(__file__))
+    with app.test_client() as test_client:
+        response = test_client.get("/api/documents/legal_text_0001/source")
+    assert response.status_code == 200
+    assert response.data.startswith(b'"""')
+
+
+def test_source_endpoint_is_not_exposed_without_a_resolver(client):
+    response = client.get("/api/documents/legal_text_0001/source")
+    assert response.status_code == 404
+    assert response.get_json()["error"]["type"] == "SourceUnavailable"
 
 
 def test_search_with_filters_and_lexical_narrows_results(client):

@@ -18,7 +18,7 @@ alternative implementation now -- v0 ships exactly one, `InlineEmbeddingProvider
 """
 from __future__ import annotations
 
-from typing import Iterable, Optional, Protocol, runtime_checkable
+from typing import Iterable, Optional, Protocol, Sequence, runtime_checkable
 
 from app.core.schema.embedding import Embedding, EmbeddedDocumentRecord
 
@@ -44,6 +44,30 @@ class EmbeddingProvider(Protocol):
         error condition, and implementations must not raise for a
         missing/unembedded document.
         """
+        ...
+
+
+@runtime_checkable
+class TextEmbedder(Protocol):
+    """A model that turns document and query text into compatible vectors.
+
+    The generic core depends only on this small contract, never on a
+    particular ML library or hosted API.  Implementations may use a local
+    SentenceTransformer, an API, or another embedding runtime, provided
+    they produce vectors from the same model for both methods.
+    """
+
+    @property
+    def model_id(self) -> str:
+        """Stable identifier for the model/version that creates its vectors."""
+        ...
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        """Embed source documents, in input order."""
+        ...
+
+    def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
+        """Embed user queries, in input order, using the same vector space."""
         ...
 
 

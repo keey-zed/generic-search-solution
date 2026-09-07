@@ -49,6 +49,19 @@ search:
   semantic:
     enabled: true                          # turn off if this project has no embeddings
     multi_query_combination: max_score      # how multiple semantic queries in one request combine
+    # Optional: declare a local embedder here and bootstrap.py builds it
+    # for you (model, prefixes, device, batch size, on-disk cache) --
+    # no Python code or environment variables needed. Omit this whole
+    # block if you're supplying embeddings another way (a hosted API, a
+    # vector DB, or a precomputed pipeline) via your own text_embedder /
+    # embedding_provider argument to build_search_engine().
+    # embedder:
+    #   provider: sentence_transformer
+    #   model: intfloat/multilingual-e5-large
+    #   document_prefix: "passage: "
+    #   query_prefix: "query: "
+    #   batch_size: 32
+    #   cache_path: data/embeddings/<your-project>.safetensors
   lexical:
     enabled: true                          # boolean/substring text search
   ranking:

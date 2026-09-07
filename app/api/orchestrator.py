@@ -44,22 +44,23 @@ nothing calling `SearchEngine.search()` ever needs to know about
 """
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
-from typing import Iterable, Mapping, Optional, Sequence, Union
+from typing import Any, Iterable, Mapping, Optional, Sequence, Union
 
 from app.api.errors import BadConfigError, BadQueryError
 from app.api.observability import log_no_results, log_stage
 from app.api.request import SearchRequest
 from app.core.config.loader import ConfigLoadError
 from app.core.config.models import UseCaseConfig
-from app.core.embeddings.provider import EmbeddingProvider
+from app.core.embeddings.provider import EmbeddingProvider, TextEmbedder
 from app.core.filtering import CustomFilterMap, Filter, FilterError, load_filters
 from app.core.schema.metadata_types import NormalizedDocument
 from app.core.schema.search_hit import SearchHit
 from app.core.search.lexical import lexical_search
 from app.core.search.pagination import SearchResultPage, paginate
 from app.core.search.ranking import merge_and_rank
-from app.core.search.semantic import InMemoryVectorStore, semantic_search
+from app.core.search.semantic import InMemoryVectorStore, SemanticQuery, semantic_search
 
 
 def _hydrate_metadata(
@@ -110,6 +111,7 @@ class SearchEngine:
         documents: Iterable[NormalizedDocument],
         *,
         embedding_provider: Optional[EmbeddingProvider] = None,
+        text_embedder: Optional[TextEmbedder] = None,
     ):
         self._config = config
         self._filters: dict[str, Filter] = dict(filters)
@@ -118,6 +120,18 @@ class SearchEngine:
             doc.id: doc for doc in self._documents
         }
         self._embedding_provider = embedding_provider
+        self._text_embedder = text_embedder
+        provider_model_id = getattr(embedding_provider, "model_id", None)
+        if (
+            text_embedder is not None
+            and provider_model_id is not None
+            and provider_model_id != text_embedder.model_id
+        ):
+            raise ValueError(
+                "text_embedder and embedding_provider use different models "
+                f"({text_embedder.model_id!r} vs {provider_model_id!r}); semantic "
+                "queries and document vectors must share one vector space"
+            )
 
     @classmethod
     def from_config_path(
@@ -127,6 +141,7 @@ class SearchEngine:
         *,
         custom_filters: Optional[CustomFilterMap] = None,
         embedding_provider: Optional[EmbeddingProvider] = None,
+        text_embedder: Optional[TextEmbedder] = None,
     ) -> "SearchEngine":
         """Load `config_path`, build its filters (including any §6
         `custom_filters` override), and bundle them with `documents` into
@@ -142,7 +157,87 @@ class SearchEngine:
             config, filters = load_filters(config_path, custom_filters=custom_filters)
         except ConfigLoadError as exc:
             raise BadConfigError(str(exc)) from exc
-        return cls(config, filters, documents, embedding_provider=embedding_provider)
+        return cls(
+            config,
+            filters,
+            documents,
+            embedding_provider=embedding_provider,
+            text_embedder=text_embedder,
+        )
+
+    @property
+    def config(self) -> UseCaseConfig:
+        """Return the validated project configuration for transport adapters.
+
+        The engine retains ownership of its operational state (documents,
+        filters, and embedding providers). This read-only access point avoids
+        a frontend adapter reaching into private state or duplicating YAML.
+        """
+        return self._config
+
+    def get_document(self, document_id: str) -> Optional[NormalizedDocument]:
+        """Return an indexed document by its opaque ID, if it exists."""
+        return self._documents_by_id.get(document_id)
+
+    def capabilities(self) -> dict[str, bool]:
+        """Return query modes that this initialized engine can actually serve."""
+        semantic = self._config.search.semantic.enabled and self._embedding_provider is not None
+        return {
+            "lexical": self._config.search.lexical.enabled,
+            "semantic": semantic,
+            "semantic_text": semantic and self._text_embedder is not None,
+        }
+
+    def filter_facets(self, fields: Optional[Iterable[str]] = None) -> dict[str, dict[str, Any]]:
+        """Summarize filterable values currently present in the corpus.
+
+        The result is configuration-driven: equality fields expose distinct
+        values, list ``contains`` fields expose distinct list items, and range
+        fields expose their populated bounds. String ``contains`` fields are
+        free-text controls, so they only report their populated-record count.
+        This lets a UI avoid rendering a selectable filter with no source data.
+        """
+        requested_fields = list(fields) if fields is not None else list(self._config.filters)
+        unknown_fields = set(requested_fields) - set(self._config.filters)
+        if unknown_fields:
+            raise ValueError(f"unknown filter field(s): {sorted(unknown_fields)}")
+
+        def json_value(value: Any) -> Any:
+            return value.isoformat() if isinstance(value, date) else value
+
+        facets: dict[str, dict[str, Any]] = {}
+        for field_name in requested_fields:
+            field_config = self._config.filters[field_name]
+            populated = [
+                document.metadata.get(field_name)
+                for document in self._documents
+                if document.metadata.get(field_name) is not None
+            ]
+            facet: dict[str, Any] = {"available_count": len(populated)}
+
+            if field_config.operation == "range":
+                facet["min"] = json_value(min(populated)) if populated else None
+                facet["max"] = json_value(max(populated)) if populated else None
+            elif field_config.operation == "equality":
+                counts: dict[Any, int] = {}
+                for value in populated:
+                    counts[value] = counts.get(value, 0) + 1
+                facet["values"] = [
+                    {"value": json_value(value), "count": count}
+                    for value, count in sorted(counts.items(), key=lambda item: str(item[0]).casefold())
+                ]
+            elif field_config.type.value == "list":
+                counts = {}
+                for values in populated:
+                    for value in set(values):
+                        counts[value] = counts.get(value, 0) + 1
+                facet["values"] = [
+                    {"value": json_value(value), "count": count}
+                    for value, count in sorted(counts.items(), key=lambda item: str(item[0]).casefold())
+                ]
+
+            facets[field_name] = facet
+        return facets
 
     # -- internal stages ----------------------------------------------
 
@@ -179,7 +274,25 @@ class SearchEngine:
         filtering, so semantic search cannot resurrect a document
         filtering already excluded.
         """
-        if not request.semantic:
+        queries = list(request.semantic)
+        if request.semantic_text:
+            if self._text_embedder is None:
+                raise BadConfigError(
+                    "a semantic_text query was provided, but this SearchEngine was "
+                    "constructed without a text_embedder"
+                )
+            vectors = self._text_embedder.embed_queries(request.semantic_text)
+            if len(vectors) != len(request.semantic_text):
+                raise BadConfigError(
+                    f"text_embedder returned {len(vectors)} vectors for "
+                    f"{len(request.semantic_text)} semantic text queries"
+                )
+            try:
+                queries.extend(SemanticQuery(vector=vector) for vector in vectors)
+            except ValueError as exc:
+                raise BadConfigError(f"text_embedder returned an invalid vector: {exc}") from exc
+
+        if not queries:
             return []
         if not self._config.search.semantic.enabled:
             raise BadQueryError(
@@ -210,7 +323,7 @@ class SearchEngine:
         try:
             return semantic_search(
                 store,
-                request.semantic,
+                queries,
                 top_k=len(store),
                 strategy=self._config.search.semantic.multi_query_combination,
             )
@@ -257,7 +370,7 @@ class SearchEngine:
 
         with log_stage(
             "search",
-            semantic_query_count=len(request.semantic),
+            semantic_query_count=len(request.semantic) + len(request.semantic_text),
             has_lexical_rule=request.lexical is not None,
         ) as out:
             semantic_hits = self._run_semantic(candidates, request)

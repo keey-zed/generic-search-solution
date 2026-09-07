@@ -283,6 +283,41 @@ class FrontendConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# Extend deliberately as new embedding backends are actually adopted —
+# each new value here must be matched by a branch in
+# app/embeddings/factory.py:build_text_embedder.
+EmbedderProvider = Literal["sentence_transformer"]
+
+
+class EmbedderConfig(BaseModel):
+    """Declarative description of how to build this use case's semantic
+    embedder (source doc §5 / §8), so the common "local model + on-disk
+    cache" path is fully config-driven instead of living in environment
+    variables or a project's Python entrypoint.
+
+    Deliberately optional at the `SemanticSearchConfig` level: a project
+    that supplies its own `TextEmbedder` / `EmbeddingProvider` in code
+    (a hosted embedding API, a vector DB lookup, vectors precomputed by
+    an external pipeline — source doc §8's other two options) can omit
+    this section entirely and wire that implementation in directly at
+    startup. This section only covers the one path common enough to be
+    worth a generic, reusable factory.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: EmbedderProvider = "sentence_transformer"
+    model: str
+    document_prefix: str = "passage: "
+    query_prefix: str = "query: "
+    device: Optional[str] = None
+    batch_size: int = Field(default=32, gt=0)
+    # Relative or absolute path to the on-disk vector cache for this use
+    # case. Omit to keep embedding entirely in memory (recomputed every
+    # startup) -- fine for small corpora or short-lived processes.
+    cache_path: Optional[str] = None
+
+
 class SemanticSearchConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -291,6 +326,8 @@ class SemanticSearchConfig(BaseModel):
     # combined into one ranked set. Exactly two strategies exist in v0 —
     # extend deliberately (see docs/config-schema.md).
     multi_query_combination: Literal["max_score", "weighted_average"] = "max_score"
+    # Optional: see EmbedderConfig's own docstring for when to omit this.
+    embedder: Optional[EmbedderConfig] = None
 
 
 class LexicalSearchConfig(BaseModel):

@@ -15,4 +15,6 @@ jsonschema>=4.0
 rapidfuzz>=3.0   # only needed for app/custom/books fuzzy title filter
 flask>=3.0       # only needed for app/api/http.py (exposing SearchEngine over HTTP)
 flask-cors>=4.0  # only needed for app/api/http.py's CORS support
+numpy>=1.24      # only needed for app/embeddings/cache.py's vector storage
+safetensors>=0.4 # only needed for app/embeddings/cache.py's on-disk cache format
 pytest>=8.0      # for running tests/

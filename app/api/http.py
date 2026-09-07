@@ -18,13 +18,19 @@ names. A project wires it up with two lines in its own bootstrap:
     from app.api.http import create_search_blueprint
     app.register_blueprint(create_search_blueprint(engine), url_prefix="/api")
 
-That gives the project exactly two routes:
+That gives the project these frontend-facing routes:
 
     GET  /api/health   -> {"status": "ok"}
+    GET  /api/config   -> resolved branding, filter controls, capabilities,
+                          and pagination limits
+    GET  /api/facets   -> currently available filter values / date bounds
     POST /api/search   -> body is a JSON `SearchRequest`
                            (see app/api/request.py for the shape),
                            response is a JSON `SearchResultPage`
                            (see app/core/search/pagination/engine.py)
+    GET  /api/documents/<id> -> full indexed text, metadata, and navigation URLs
+    GET  /api/documents/<id>/source -> original file, only when a project
+                                        supplies a source-file resolver
 
 Status code mapping (per `app/api/errors.py`'s own stated intent):
 
@@ -67,17 +73,23 @@ app may already have its own CORS policy) but accepts the same
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, Sequence, Union
+from pathlib import Path
+from typing import Any, Callable, Optional, Sequence, Union
 
-from flask import Blueprint, Flask, jsonify, request as flask_request
+from flask import Blueprint, Flask, jsonify, request as flask_request, send_file, url_for
 from pydantic import ValidationError
 from werkzeug.exceptions import HTTPException
 
 from app.api.errors import BadConfigError, BadQueryError
 from app.api.orchestrator import SearchEngine
 from app.api.request import SearchRequest
+from app.core.schema.metadata_types import NormalizedDocument
 
 logger = logging.getLogger("app.api.http")
+
+# The use-case layer maps an indexed document to an original file. The HTTP
+# layer never builds a filesystem path from a client-provided document ID.
+SourceFileResolver = Callable[[NormalizedDocument], Optional[Path]]
 
 
 def _error_response(status: int, error_type: str, message: str, *, details: Any = None):
@@ -113,11 +125,44 @@ def register_json_error_handlers(app: Flask) -> None:
         return _error_response(500, "InternalError", "an unexpected error occurred")
 
 
+def _frontend_config_payload(engine: SearchEngine) -> dict[str, Any]:
+    """Return the resolved, client-safe portion of a use-case configuration."""
+    config = engine.config
+    filters: list[dict[str, Any]] = []
+    for name, override in sorted(config.frontend.filters.items(), key=lambda item: item[1].order):
+        field = config.filters[name]
+        filters.append(
+            {
+                "name": name,
+                "label": override.label,
+                "control": override.control,
+                "order": override.order,
+                "placeholder": override.placeholder,
+                "type": field.type.value,
+                "item_type": field.item_type.value if field.item_type is not None else None,
+                "operation": field.operation,
+                "required": field.required,
+                "default": field.default,
+            }
+        )
+    return {
+        "branding": config.frontend.branding.model_dump(mode="json"),
+        "filters": filters,
+        "result_card_fields": config.frontend.result_card_fields,
+        "search": engine.capabilities(),
+        "pagination": {
+            "default_page_size": config.search.pagination.default_page_size,
+            "max_page_size": config.search.pagination.max_page_size,
+        },
+    }
+
+
 def create_search_blueprint(
     engine: SearchEngine,
     name: str = "search_api",
     *,
     cors_origins: Optional[Union[str, Sequence[str]]] = None,
+    source_file_resolver: Optional[SourceFileResolver] = None,
 ) -> Blueprint:
     """Build a Flask `Blueprint` exposing `engine` over HTTP.
 
@@ -134,6 +179,11 @@ def create_search_blueprint(
     CORS policy. Pass `"*"` or a list of allowed origins to enable CORS
     for just this blueprint's routes (requires `flask-cors`; raises
     `RuntimeError` with an install hint if it isn't installed).
+
+    `source_file_resolver` is an optional use-case adapter from an indexed
+    document to its original file. When supplied, source URLs are included in
+    search/document responses and ``GET /documents/<id>/source`` is enabled.
+    The adapter owns path validation and access policy.
     """
     blueprint = Blueprint(name, __name__)
 
@@ -150,6 +200,64 @@ def create_search_blueprint(
     @blueprint.get("/health")
     def health():  # pragma: no cover - trivial
         return jsonify({"status": "ok"})
+
+    @blueprint.get("/config")
+    def frontend_config():
+        """Expose the resolved UI contract without leaking server config."""
+        return jsonify(_frontend_config_payload(engine))
+
+    @blueprint.get("/facets")
+    def facets():
+        # Only advertised controls are returned. A backend-only filter stays
+        # callable through POST /search but is not accidentally exposed in UI.
+        fields = list(engine.config.frontend.filters)
+        return jsonify({"filters": engine.filter_facets(fields)})
+
+    def _document_url(document_id: str) -> str:
+        return url_for(f"{blueprint.name}.document", document_id=document_id)
+
+    def _source_url(document: NormalizedDocument) -> Optional[str]:
+        if source_file_resolver is None:
+            return None
+        result = url_for(f"{blueprint.name}.document_source", document_id=document.id)
+        page = document.metadata.get("source_page")
+        # PDF viewers understand #page=N. Fragments stay client-side and do
+        # not affect the server's source-file access controls.
+        return f"{result}#page={page}" if isinstance(page, int) and page > 0 else result
+
+    def _document_payload(document: NormalizedDocument, *, include_text: bool) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": document.id,
+            "metadata": document.model_dump(mode="json")["metadata"],
+            "document_url": _document_url(document.id),
+            "source_url": _source_url(document),
+        }
+        if include_text:
+            payload["text"] = document.text
+        return payload
+
+    @blueprint.get("/documents/<path:document_id>")
+    def document(document_id: str):
+        indexed_document = engine.get_document(document_id)
+        if indexed_document is None:
+            return _error_response(404, "DocumentNotFound", "document was not found")
+        return jsonify(_document_payload(indexed_document, include_text=True))
+
+    @blueprint.get("/documents/<path:document_id>/source")
+    def document_source(document_id: str):
+        indexed_document = engine.get_document(document_id)
+        if indexed_document is None:
+            return _error_response(404, "DocumentNotFound", "document was not found")
+        if source_file_resolver is None:
+            return _error_response(404, "SourceUnavailable", "source file is not available")
+        try:
+            source_path = source_file_resolver(indexed_document)
+        except (OSError, ValueError) as exc:
+            logger.warning("source resolver rejected document %r: %s", document_id, exc)
+            source_path = None
+        if not isinstance(source_path, Path) or not source_path.is_file():
+            return _error_response(404, "SourceUnavailable", "source file is not available")
+        return send_file(source_path, conditional=True)
 
     @blueprint.post("/search")
     def search():
@@ -186,7 +294,16 @@ def create_search_blueprint(
                 500, "InternalError", "an unexpected error occurred"
             )
 
-        return jsonify(result_page.model_dump(mode="json"))
+        body = result_page.model_dump(mode="json")
+        for hit in body["hits"]:
+            indexed_document = engine.get_document(hit["id"])
+            # Defensive fallback: a provider cannot make an otherwise valid
+            # search response fail merely because it returned a stale ID.
+            hit["document_url"] = (
+                _document_url(indexed_document.id) if indexed_document is not None else None
+            )
+            hit["source_url"] = _source_url(indexed_document) if indexed_document is not None else None
+        return jsonify(body)
 
     return blueprint
 
@@ -196,6 +313,7 @@ def create_http_app(
     *,
     url_prefix: str = "/api",
     cors_origins: Optional[Union[str, Sequence[str]]] = "*",
+    source_file_resolver: Optional[SourceFileResolver] = None,
 ) -> Flask:
     """Convenience factory for the common case of "just give me a Flask
     app for this one engine." Registers `register_json_error_handlers()`
@@ -203,6 +321,10 @@ def create_http_app(
     and enables CORS by default (`cors_origins="*"`) so a frontend on a
     different origin works out of the box -- pass `cors_origins=None`
     to disable, or a specific origin/list to restrict it.
+
+    `source_file_resolver` optionally enables original-file delivery for
+    document records. It belongs in a use case's custom layer, where source
+    paths and authorization can be validated safely.
 
     Named `create_http_app`, not `create_app`, deliberately: this
     package (`app/`) already has a zero-argument `create_app()` at
@@ -241,6 +363,11 @@ def create_http_app(
 
     register_json_error_handlers(app)
     app.register_blueprint(
-        create_search_blueprint(engine, cors_origins=cors_origins), url_prefix=url_prefix
+        create_search_blueprint(
+            engine,
+            cors_origins=cors_origins,
+            source_file_resolver=source_file_resolver,
+        ),
+        url_prefix=url_prefix,
     )
     return app

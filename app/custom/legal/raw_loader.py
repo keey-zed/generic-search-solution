@@ -4,22 +4,19 @@ app/custom/legal/raw_loader.py
 The legal project's own `load_raw_records()`, filled in following
 app/custom/_template/raw_loader.py's pattern.
 
-A real deployment would parse an actual legal-text XML dump (or
-whatever source system this project pulls from) here. Since Phase 3's
-job is proving the TEMPLATE and REGISTRATION PATTERN work, not shipping
-a real legal corpus, this returns a small embedded sample instead --
-enough for tests/test_custom_layer_template.py to build a real
-`SearchEngine` and run real searches against it end to end, without any
-external data dependency.
-
-Swap the body of this function for real extraction logic (reading a
-file, calling an API, querying a database, ...) when this project moves
-from "proof the pattern works" to "real deployment" -- nothing else in
-this package, or in app/core/ or app/api/, needs to change either way.
+The no-argument form retains the small embedded corpus used by the
+template tests.  Pass ``documents_dir`` to extract an actual directory of
+PDFs (such as Bulletin Officiel files) instead.  The extraction stays in
+this custom layer; ``app.core`` still only receives its generic
+``{id, text, metadata}`` wire format.
 """
 from __future__ import annotations
 
-from typing import Any
+import json
+from pathlib import Path
+from typing import Any, Mapping
+
+from app.ingestion import extract_pdf_records
 
 _SAMPLE_RECORDS: list[dict[str, Any]] = [
     {
@@ -69,5 +66,56 @@ _SAMPLE_RECORDS: list[dict[str, Any]] = [
 ]
 
 
-def load_raw_records() -> list[dict[str, Any]]:
-    return _SAMPLE_RECORDS
+def _load_metadata_sidecar(metadata_path: Path | None) -> Mapping[str, Mapping[str, Any]]:
+    if metadata_path is None or not metadata_path.exists():
+        return {}
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON metadata sidecar {metadata_path}: {exc}") from exc
+    if not isinstance(data, dict) or not all(isinstance(key, str) and isinstance(value, dict) for key, value in data.items()):
+        raise ValueError(
+            f"metadata sidecar {metadata_path} must be an object mapping PDF paths/names to metadata objects"
+        )
+    return data
+
+
+def load_raw_records(
+    documents_dir: str | Path | None = None,
+    *,
+    metadata_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Return sample records, or page-level records extracted from PDFs.
+
+    ``metadata_path`` is an optional JSON object keyed by a PDF filename
+    or its path relative to ``documents_dir``.  It supplies real legal
+    metadata (publication date, subjects, title, etc.) without hardcoding
+    any filename or legal parsing rule in the generic extractor.
+    """
+    if documents_dir is None:
+        return _SAMPLE_RECORDS
+
+    directory = Path(documents_dir)
+    if not directory.is_dir():
+        raise ValueError(f"PDF source directory does not exist or is not a directory: {directory}")
+    sidecar = Path(metadata_path) if metadata_path is not None else directory / "metadata.json"
+    extraction = extract_pdf_records(
+        directory,
+        metadata_by_source=_load_metadata_sidecar(sidecar),
+        # A BO issue is the indexed document here.  Sidecar metadata can
+        # override this with a more specific project taxonomy.
+        default_metadata={"document_type": "bulletin_officiel"},
+    )
+    errors = [issue for issue in extraction.issues if issue.severity == "error"]
+    if errors:
+        details = "; ".join(
+            f"{issue.path}{f' page {issue.page_number}' if issue.page_number else ''}: {issue.message}"
+            for issue in errors
+        )
+        raise ValueError(f"PDF extraction failed: {details}")
+    if not extraction.records:
+        raise ValueError(
+            f"no searchable native text was extracted from {directory}; "
+            "the PDFs may be scanned and require an OCR stage"
+        )
+    return extraction.records

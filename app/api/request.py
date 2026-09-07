@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.search.lexical import LexicalQuery
 from app.core.search.semantic import SemanticQuery
@@ -14,7 +14,7 @@ from app.core.search.semantic import SemanticQuery
 class SearchRequest(BaseModel):
     """One request to `SearchEngine.search()` (`app/api/orchestrator.py`).
 
-    At least one of `semantic` or `lexical` must be given -- a request
+    At least one of `semantic`, `semantic_text`, or `lexical` must be given -- a request
     with neither has nothing to search for (`filters` alone narrows a
     candidate set but is not itself a query; see source doc §3 vs §2).
     This is intentionally enforced here, at the request's own boundary,
@@ -32,6 +32,13 @@ class SearchRequest(BaseModel):
             "Zero or more semantic queries. Empty means 'no semantic "
             "search for this request' -- not an error by itself, as "
             "long as `lexical` is given instead."
+        ),
+    )
+    semantic_text: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Zero or more natural-language semantic queries. The engine's configured "
+            "TextEmbedder converts these to vectors using the same model as the corpus."
         ),
     )
     lexical: Optional[LexicalQuery] = Field(
@@ -62,12 +69,19 @@ class SearchRequest(BaseModel):
         description="None uses the project's config.yaml search.pagination.default_page_size.",
     )
 
+    @field_validator("semantic_text")
+    @classmethod
+    def semantic_text_must_not_be_blank(cls, values: list[str]) -> list[str]:
+        if any(not value.strip() for value in values):
+            raise ValueError("semantic_text entries must not be blank")
+        return values
+
     @model_validator(mode="after")
     def at_least_one_query_mode(self) -> "SearchRequest":
-        if not self.semantic and self.lexical is None:
+        if not self.semantic and not self.semantic_text and self.lexical is None:
             raise ValueError(
-                "a SearchRequest must provide at least one of `semantic` "
-                "(one or more queries) or `lexical` (a boolean rule) -- "
+                "a SearchRequest must provide at least one of `semantic`, `semantic_text` "
+                "(one or more semantic queries), or `lexical` (a boolean rule) -- "
                 "`filters` alone narrows a candidate set but is not a query"
             )
         return self
