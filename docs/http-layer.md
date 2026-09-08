@@ -64,6 +64,45 @@ Response body on success (`200`): a JSON `SearchResultPage`
 (`app/core/search/pagination/engine.py`) — `hits`, `page`, `page_size`,
 `total_hits`, `total_pages`, `has_previous`, `has_next`.
 
+### `GET /config`
+
+Returns the resolved, client-safe UI contract for the running use case —
+branding, the visible filter list (sorted by `order`, with `control`
+always resolved to a concrete value), `result_card_fields`, effective
+search capabilities, and pagination defaults. See
+`docs/frontend-control-mapping.md` for the full response shape and the
+payload contract each rendered control must produce.
+
+### `GET /facets`
+
+Returns, per visible filter field, a summary of the values actually
+present in the corpus right now: distinct values + counts for
+`equality`/list-`contains` fields, populated `min`/`max` for `range`
+fields, just a record count for string-`contains` (free-text) fields.
+This is the data a control needs to populate itself — a dropdown's
+option list, a range picker's real bounds — not just its static shape.
+Always summarizes every filter listed under `frontend.filters:` (the
+same fields `GET /config` advertises) — a backend-only filter (declared
+under `filters:` but not `frontend.filters:`) stays callable through
+`POST /search` but is never summarized here. See
+`docs/frontend-control-mapping.md` for the exact per-operation response
+shapes.
+
+### `GET /documents/<id>`
+
+Returns one document's full metadata plus a self-referencing navigation
+URL, and — if a `source_file_resolver` was supplied to
+`create_search_blueprint()`/`create_http_app()` — a `source_url` for
+fetching the original file.
+
+### `GET /documents/<id>/source`
+
+Streams the original source file for a document, if a
+`source_file_resolver` was configured. `404` if no resolver was
+supplied, or if the resolver can't locate a source file for that id —
+the resolver owns path validation and access policy, this route never
+resolves a path itself.
+
 ## Status code mapping
 
 | Status | When | Body shape |

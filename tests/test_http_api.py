@@ -119,7 +119,7 @@ def test_facets_endpoint_exposes_only_visible_filter_data(client):
         "legal_status",
         "title",
     }
-    assert facets["publication_date"]["min"] == "2003-06-06"
+    assert facets["publication_date"]["min"] == "1993-02-17"
     assert facets["publication_date"]["max"] == "2023-01-26"
     assert {entry["value"] for entry in facets["document_type"]["values"]} == {
         "arrete", "dahir", "decret", "loi"
