@@ -211,6 +211,49 @@ An unsupported version fails immediately and by name:
 never a confusing downstream error from a field the new version expected
 but the old config doesn't have.
 
+### Migration notes (Phase 6, item 2)
+
+This section is the running log every future breaking `schema_version`
+bump adds an entry to, in the same format each time — so migrating an
+already-deployed project's `config.yaml` from one version to the next is
+a documented lookup, not a guess. Nothing has bumped `schema_version`
+yet (only `1` has ever existed), so there are no entries below yet — but
+the format is fixed now, before it's needed, per the roadmap's own
+framing ("document that schema_version exists precisely so that... there's
+a defined path to reconcile, rather than a silent break").
+
+**Format for each future entry:**
+
+```markdown
+### v1 → v2 (YYYY-MM-DD)
+
+**Breaking change:** <what changed and why it couldn't be additive>
+
+**What to do to an existing config.yaml:**
+1. <concrete edit, e.g. "rename `operation: between` to `operation: range`">
+2. <...>
+
+**Fails loudly as:** `<the exact error message an un-migrated v1 config now produces>`
+```
+
+### How this interacts with the "repo-copy" model
+
+Because every project is a **copy** of this codebase (not a shared
+library — see Phase 6's own framing and `CHANGELOG.md`), a
+`schema_version` bump in the "source of truth" template repo doesn't
+automatically reach any project copy. When a project pulls in a core
+update (see `CHANGELOG.md`'s "back-porting to project copies" section):
+
+1. Check the incoming `CHANGELOG.md` entry for a `schema_version` bump.
+2. If there is one, find its migration notes entry above and apply the
+   edits to that project's `config.yaml`.
+3. If there isn't one, no config changes are needed — a non-breaking
+   core improvement (e.g. a new optional key, a new filter operation) is
+   opt-in by construction; an untouched `config.yaml` keeps working
+   exactly as before.
+4. Either way, re-run that project's test suite baseline
+   (`docs/test-suite-baseline.md`) before considering the sync done.
+
 ## 7. Security note
 
 `load_use_case_config()` uses `yaml.safe_load()`, never `yaml.load()` or
