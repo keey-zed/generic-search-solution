@@ -74,8 +74,10 @@ search:
 frontend:
   branding:
     title: "البحث في النصوص القانونية"
+    page_title: "Law, Simplified"
     subtitle: null
-    primary_color: "#4054B8"
+    favicon_url: "/assets/legal_favicon.ico"
+    primary_color: "#a8562f"
     search_placeholder: "اكتب استعلامًا ثم اضغط Enter"
     semantic_search_placeholder: "اكتب استعلامًا قانونيًا واحدًا، ويمكن أن يحتوي على عدة أسطر"
     direction: rtl

@@ -239,8 +239,10 @@ class BrandingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str
+    page_title: Optional[str] = None
     subtitle: Optional[str] = None
     logo_url: Optional[str] = None
+    favicon_url: Optional[str] = None
     primary_color: Optional[str] = None
     search_placeholder: Optional[str] = None
     semantic_search_placeholder: Optional[str] = None

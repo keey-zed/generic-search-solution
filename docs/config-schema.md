@@ -25,8 +25,10 @@ search:                 # generic search/ranking/pagination behavior
 frontend:                # presentation layer
   branding:
     title: string
+    page_title: string | null
     subtitle: string | null
     logo_url: string | null
+    favicon_url: string | null
     primary_color: "#RRGGBB" | null
     search_placeholder: string | null
     semantic_search_placeholder: string | null
