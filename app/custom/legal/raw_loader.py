@@ -122,6 +122,16 @@ def load_raw_records(
         # override this with a more specific project taxonomy.
         default_metadata={"document_type": "bulletin_officiel"},
     )
+
+    # `source_file` is generic extractor provenance. The legal UI also
+    # exposes a project-level `file_name` field; for one-PDF-per-issue input
+    # it is a truthful, useful default even when no optional metadata sidecar
+    # has been provided. A sidecar remains authoritative if it supplies a
+    # different display value.
+    for record in extraction.records:
+        metadata = record["metadata"]
+        metadata.setdefault("file_name", metadata["source_file"])
+
     errors = [issue for issue in extraction.issues if issue.severity == "error"]
     if errors:
         details = "; ".join(
