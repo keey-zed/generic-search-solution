@@ -4,8 +4,8 @@ tests/test_http_api.py
 Proves `app/api/http.py` actually closes the gap it claims to close:
 that a client (a frontend, a CLI, `curl`) can reach a fully-built
 `SearchEngine` over HTTP, with no use-case-specific code in the HTTP
-layer itself. Reuses the exact `legal_pilot` construction from
-`tests/test_pilot_definition_of_done.py` rather than a fake engine, so
+layer itself. Reuses the exact `legal` construction rather than a fake
+engine, so
 this is an end-to-end proof through the real config/filters/ingestion
 stack, not just a mock of `SearchEngine.search()`.
 """
@@ -28,12 +28,12 @@ def _fake_embedding(seed: int, dim: int = 4) -> Embedding:
 
 
 @pytest.fixture()
-def pilot_engine() -> SearchEngine:
-    from app.custom.legal_pilot.raw_loader import load_raw_records
+def legal_engine() -> SearchEngine:
+    from app.custom.legal.raw_loader import load_raw_records
     from app.core.config import load_use_case_config
     from app.core.ingestion import ingest_raw_records
 
-    config = load_use_case_config("app/custom/legal_pilot/config.yaml")
+    config = load_use_case_config("app/custom/legal/config.yaml")
     report = ingest_raw_records(load_raw_records(), config.to_metadata_schema())
     assert report.is_clean, report.summary
 
@@ -45,7 +45,7 @@ def pilot_engine() -> SearchEngine:
         ]
     )
     return SearchEngine.from_config_path(
-        "app/custom/legal_pilot/config.yaml",
+        "app/custom/legal/config.yaml",
         report.valid_documents,
         custom_filters={},
         embedding_provider=embedding_provider,
@@ -53,8 +53,8 @@ def pilot_engine() -> SearchEngine:
 
 
 @pytest.fixture()
-def client(pilot_engine: SearchEngine):
-    app = create_http_app(pilot_engine)
+def client(legal_engine: SearchEngine):
+    app = create_http_app(legal_engine)
     app.config.update(TESTING=True)
     with app.test_client() as test_client:
         yield test_client
@@ -92,17 +92,21 @@ def test_config_endpoint_exposes_resolved_frontend_contract(client):
     response = client.get("/api/config")
     assert response.status_code == 200
     body = response.get_json()
-    assert body["branding"]["title"] == "Recherche des Textes Juridiques"
+    assert body["branding"]["title"] == "البحث في النصوص القانونية"
+    assert body["branding"]["direction"] == "rtl"
+    assert body["labels"]["search_button"] == "بحث"
     assert [field["name"] for field in body["filters"]] == [
+        "mandatory_keywords",
+        "subjects",
+        "signatures",
+        "file_name",
+        "document_type",
+        "law_number",
         "publication_date",
         "promulgation_date",
-        "document_type",
-        "issuing_authority",
-        "legal_status",
-        "title",
     ]
-    assert body["filters"][0]["operation"] == "range"
-    assert body["filters"][0]["control"] == "date_range"
+    assert body["filters"][0]["operation"] == "equality"
+    assert body["filters"][0]["control"] == "dropdown"
     assert body["search"] == {"lexical": True, "semantic": True, "semantic_text": False}
     assert body["pagination"]["max_page_size"] == 100
 
@@ -112,42 +116,44 @@ def test_facets_endpoint_exposes_only_visible_filter_data(client):
     assert response.status_code == 200
     facets = response.get_json()["filters"]
     assert set(facets) == {
+        "mandatory_keywords",
+        "subjects",
+        "signatures",
+        "file_name",
+        "law_number",
+        "document_type",
         "publication_date",
         "promulgation_date",
-        "document_type",
-        "issuing_authority",
-        "legal_status",
-        "title",
     }
-    assert facets["publication_date"]["min"] == "1993-02-17"
-    assert facets["publication_date"]["max"] == "2023-01-26"
+    assert facets["publication_date"]["min"] == "2019-12-31"
+    assert facets["publication_date"]["max"] == "2022-06-01"
     assert {entry["value"] for entry in facets["document_type"]["values"]} == {
         "arrete", "dahir", "decret", "loi"
     }
-    assert facets["title"]["available_count"] == 12
-    assert "values" not in facets["title"]
+    assert facets["mandatory_keywords"]["available_count"] == 4
+    assert "values" not in facets["mandatory_keywords"]
 
 
 def test_document_endpoint_returns_document_and_navigation_url(client):
-    response = client.get("/api/documents/legal_text_0001")
+    response = client.get("/api/documents/legal-1")
     assert response.status_code == 200
     body = response.get_json()
-    assert body["id"] == "legal_text_0001"
-    assert "protection des donnees" in body["text"]
-    assert body["document_url"] == "/api/documents/legal_text_0001"
+    assert body["id"] == "legal-1"
+    assert "finances" in body["text"]
+    assert body["document_url"] == "/api/documents/legal-1"
     assert body["source_url"] is None
 
 
-def test_source_endpoint_is_optional_and_serves_only_through_a_resolver(pilot_engine):
-    app = create_http_app(pilot_engine, source_file_resolver=lambda _document: Path(__file__))
+def test_source_endpoint_is_optional_and_serves_only_through_a_resolver(legal_engine):
+    app = create_http_app(legal_engine, source_file_resolver=lambda _document: Path(__file__))
     with app.test_client() as test_client:
-        response = test_client.get("/api/documents/legal_text_0001/source")
+        response = test_client.get("/api/documents/legal-1/source")
     assert response.status_code == 200
     assert response.data.startswith(b'"""')
 
 
 def test_source_endpoint_is_not_exposed_without_a_resolver(client):
-    response = client.get("/api/documents/legal_text_0001/source")
+    response = client.get("/api/documents/legal-1/source")
     assert response.status_code == 404
     assert response.get_json()["error"]["type"] == "SourceUnavailable"
 
@@ -261,7 +267,7 @@ def test_cors_preflight_request_is_answered(client):
     assert "Access-Control-Allow-Origin" in response.headers
 
 
-def test_create_search_blueprint_without_cors_origins_has_no_cors_headers(pilot_engine):
+def test_create_search_blueprint_without_cors_origins_has_no_cors_headers(legal_engine):
     """create_search_blueprint() alone (no cors_origins) adds no CORS
     headers -- composing it into a larger app must not silently impose
     a CORS policy that app didn't ask for."""
@@ -269,7 +275,7 @@ def test_create_search_blueprint_without_cors_origins_has_no_cors_headers(pilot_
     from app.api.http import create_search_blueprint
 
     app = Flask(__name__)
-    app.register_blueprint(create_search_blueprint(pilot_engine), url_prefix="/api")
+    app.register_blueprint(create_search_blueprint(legal_engine), url_prefix="/api")
     with app.test_client() as bare_client:
         response = bare_client.post(
             "/api/search",
@@ -280,13 +286,13 @@ def test_create_search_blueprint_without_cors_origins_has_no_cors_headers(pilot_
         assert "Access-Control-Allow-Origin" not in response.headers
 
 
-def test_create_search_blueprint_can_opt_into_cors_explicitly(pilot_engine):
+def test_create_search_blueprint_can_opt_into_cors_explicitly(legal_engine):
     from flask import Flask
     from app.api.http import create_search_blueprint
 
     app = Flask(__name__)
     app.register_blueprint(
-        create_search_blueprint(pilot_engine, cors_origins="https://example.com"),
+        create_search_blueprint(legal_engine, cors_origins="https://example.com"),
         url_prefix="/api",
     )
     with app.test_client() as scoped_client:
@@ -298,11 +304,11 @@ def test_create_search_blueprint_can_opt_into_cors_explicitly(pilot_engine):
         assert response.headers.get("Access-Control-Allow-Origin") == "https://example.com"
 
 
-def test_create_http_app_does_not_ascii_escape_non_latin_text(pilot_engine):
+def test_create_http_app_does_not_ascii_escape_non_latin_text(legal_engine):
     """app/__init__.py's legacy create_app() sets JSON_AS_ASCII = False
     for the same corpora (Arabic legal/Bulletin Officiel text) this
     engine serves -- create_http_app() must carry that setting so a
     response's Arabic metadata/snippets are readable UTF-8, not
     \\uXXXX escapes."""
-    app = create_http_app(pilot_engine)
+    app = create_http_app(legal_engine)
     assert app.config["JSON_AS_ASCII"] is False

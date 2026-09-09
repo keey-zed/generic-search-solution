@@ -51,8 +51,7 @@ app/api/        Common API — SearchEngine, SearchRequest/SearchResultPage, HTT
 
 app/custom/     One folder per project — config.yaml + raw_loader.py + custom_filters.py + bootstrap.py
   _template/      copy this to start a new project
-  legal/          worked example of the template mechanism itself
-  legal_pilot/    the Phase 4 pilot — full 5-filter set from §4's running example
+  legal/          the canonical legal search project and Phase 4/5 pilot
   books/          the source doc's own §4 fuzzy-title-matching example
 
 tests/          Generic tests (travel with every copy) + project-specific tests (written per project)
@@ -62,7 +61,7 @@ docs/           One doc per concern — see the index below
 ## Quick start: use an existing project
 
 ```python
-from app.custom.legal_pilot.bootstrap import build_search_engine
+from app.custom.legal.bootstrap import build_search_engine
 from app.api.http import create_http_app
 
 engine = build_search_engine()
@@ -105,9 +104,8 @@ of this README is a reference index, not a tutorial.
 - `docs/fuzzy-title-filter.md` — the real reference custom filter (books' `title` field).
 - `docs/custom-vs-generic.md` — the decision procedure for what belongs where, and the promotion rule.
 
-**Pilot (Phase 4):**
-- `docs/pilot-notes.md` — what was (and wasn't) considered a core change while building the pilot.
-- `docs/file-backed-ingestion.md` — reading real files off disk for a project's `raw_loader.py`.
+**Legal project (Phase 4):**
+- `docs/file-backed-ingestion.md` — reading real files off disk for the legal project's `raw_loader.py`.
 
 **Frontend contract (Phase 5):**
 - `docs/frontend-control-mapping.md` — the config→control mapping and the exact payload shape each control must produce.

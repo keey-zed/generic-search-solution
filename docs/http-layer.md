@@ -188,7 +188,7 @@ create_app` silently returning two unrelated Flask apps. It's named
 (`SemanticQuery.vector`), not natural-language query text. This module
 does not add a text-to-embedding step at the HTTP boundary — that
 remains a project-level, model-serving concern, per the same reasoning
-`docs/pilot-notes.md` §1 already recorded: query-time embedding is
+The legal project's semantic-search notes already record: query-time embedding is
 orthogonal to filtering/ranking, and belongs in a project's own
 bootstrap/route wrapper (or, if a second project independently needs
 the same thing, that repetition is the actual signal to add a generic

@@ -412,10 +412,10 @@ def test_legal_reference_config_loads_and_produces_expected_metadata_schema():
     cfg = load_use_case_config(path)
 
     assert set(cfg.filters.keys()) == {
-        "document_type", "publication_date", "promulgation_date", "subjects", "title",
+        "mandatory_keywords", "subjects", "signatures", "file_name", "law_number",
+        "document_type", "publication_date", "promulgation_date",
     }
-    # promulgation_date deliberately has no frontend entry (backend-only filter)
-    assert "promulgation_date" not in cfg.frontend.filters
+    assert "promulgation_date" in cfg.frontend.filters
     assert cfg.frontend.filters["document_type"].control == "dropdown"
     assert cfg.frontend.filters["subjects"].control == "multi_select"
 

@@ -34,7 +34,10 @@ def load_use_case_config(path: Union[str, Path]) -> UseCaseConfig:
         raise ConfigLoadError(f"config path is not a file: {path}")
 
     try:
-        raw_text = path.read_text()
+        # Config is the shared contract with the frontend and may contain
+        # Arabic or other non-ASCII branding/filter labels.  Do not use the
+        # Windows locale default (often cp1252); YAML files are UTF-8.
+        raw_text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise ConfigLoadError(f"could not read config file {path}: {exc}") from exc
 

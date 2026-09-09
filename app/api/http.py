@@ -147,6 +147,7 @@ def _frontend_config_payload(engine: SearchEngine) -> dict[str, Any]:
         )
     return {
         "branding": config.frontend.branding.model_dump(mode="json"),
+        "labels": config.frontend.labels.model_dump(mode="json"),
         "filters": filters,
         "result_card_fields": config.frontend.result_card_fields,
         "search": engine.capabilities(),

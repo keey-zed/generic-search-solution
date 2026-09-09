@@ -29,19 +29,19 @@ Returns, for the currently-running use case:
   "branding": { "title": "...", "subtitle": "...", "primary_color": "...", "search_placeholder": "..." },
   "filters": [
     {
-      "name": "publication_date",
-      "label": "Date de publication",
-      "control": "date_range",
+      "name": "document_type",
+      "label": "نوع الوثيقة",
+      "control": "dropdown",
       "order": 1,
       "placeholder": null,
-      "type": "date",
+      "type": "string",
       "item_type": null,
-      "operation": "range",
-      "required": false,
+      "operation": "equality",
+      "required": true,
       "default": null
     }
   ],
-  "result_card_fields": ["document_type", "legal_status", "publication_date", "title"],
+  "result_card_fields": ["document_type", "publication_date", "title"],
   "search": { "lexical": true, "semantic": true, "semantic_text": false },
   "pagination": { "default_page_size": 20, "max_page_size": 100 }
 }
@@ -77,7 +77,7 @@ options, a range slider's real min/max), not just its static shape:
 | `contains` on `type: list` | Same shape as `equality` — distinct list items across the corpus, with counts | Populating a `multi_select`/`checkbox_group`'s option list. |
 | `contains` on `type: string` | `{"available_count": N}` only — no `values` key | Free-text search has no finite option set; a frontend should render a plain text input, not try to read `values` (it won't be there). |
 
-`app/custom/legal_pilot`'s own facets test
+`app/custom/legal`'s own facets contract
 (`tests/test_http_api.py::test_facets_endpoint_exposes_only_visible_filter_data`)
 demonstrates exactly this: `title` (`contains` on `string`) reports only
 `available_count`, no `values` — confirmed by asserting
@@ -98,7 +98,7 @@ the exact shape `Filter.apply()`'s `params` argument expects
 | `checkbox` / `toggle` | `true` or `false`. Omit the field entirely (don't send `false`) if "unchecked" should mean "no filter applied" rather than "explicitly filter for false" — these are different things (`docs/filtering.md` §2: absent/empty params is a no-op). |
 | `multi_select` / `checkbox_group` | A list of strings (or the field's `item_type`). An empty list and an omitted field both mean "no restriction." |
 
-Worked example, using `app/custom/legal_pilot/config.yaml`'s
+Worked example, using `app/custom/legal/config.yaml`'s
 `publication_date` field (`type: date`, `operation: range`, resolved
 control `date_range`): a frontend renders two date pickers seeded with
 `/api/facets`'s reported `min`/`max`, and on submit sends

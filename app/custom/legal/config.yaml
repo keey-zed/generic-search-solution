@@ -7,6 +7,32 @@
 schema_version: 1
 
 filters:
+  mandatory_keywords:
+    type: string
+    required: false
+    operation: contains
+
+  subjects:
+    type: list
+    item_type: string
+    required: false
+    operation: contains
+
+  signatures:
+    type: string
+    required: false
+    operation: equality
+
+  file_name:
+    type: string
+    required: false
+    operation: equality
+
+  law_number:
+    type: string
+    required: false
+    operation: contains
+
   document_type:
     type: string
     required: true
@@ -21,17 +47,6 @@ filters:
     type: date
     required: false
     operation: range
-
-  subjects:
-    type: list
-    item_type: string
-    required: false
-    operation: contains
-
-  title:
-    type: string
-    required: false
-    operation: contains
 
 search:
   semantic:
@@ -58,25 +73,64 @@ search:
 
 frontend:
   branding:
-    title: "Legal Document Search"
-    subtitle: "Search justice and legal texts"
-    primary_color: "#1A2B3C"
-    search_placeholder: "Search legal documents..."
+    title: "البحث في النصوص القانونية"
+    subtitle: null
+    primary_color: "#4054B8"
+    search_placeholder: "اكتب استعلامًا ثم اضغط Enter"
+    semantic_search_placeholder: "اكتب استعلامًا قانونيًا واحدًا، ويمكن أن يحتوي على عدة أسطر"
+    direction: rtl
+  labels:
+    search_button: "بحث"
+    admin_link: "لوحة الإدارة"
+    show_filters: "إظهار فلاتر البحث المتقدم"
+    hide_filters: "إخفاء الفلاتر"
+    reset: "إعادة التعيين"
+    apply_filters: "تطبيق الفلتر"
+    result_count: "عدد النتائج"
+    no_results: "لم يتم العثور على نتائج."
+    empty_state: "ابدأ بالبحث في النصوص القانونية لعرض النتائج."
+    previous: "السابق"
+    next: "التالي"
+    semantic_search: "تفعيل البحث الدلالي (اختياري)"
+    semantic_search_hint: "البحث الدلالي متاح فقط عند إدخال استعلام واحد."
+    semantic_search_placeholder: "اكتب استعلامًا قانونيًا واحدًا، ويمكن أن يحتوي على عدة أسطر"
+    facets_error: "تعذر تحميل خيارات الفلاتر من الخادم."
   filters:
-    document_type:
-      label: "Document Type"
-      control: dropdown
+    mandatory_keywords:
+      label: "الكلمات الإلزامية"
+      control: text
       order: 1
-    publication_date:
-      label: "Publication Date"
-      order: 2
+      placeholder: "أدخل الكلمات ثم اضغط Enter أو افصل بينها بفاصلة"
     subjects:
-      label: "Subjects"
+      label: "الموضوعات"
+      control: multi_select
+      order: 2
+      placeholder: "اختر الموضوعات"
+    signatures:
+      label: "التوقيعات"
+      control: dropdown
       order: 3
-    title:
-      label: "Title"
+      placeholder: "اختر التوقيعات"
+    file_name:
+      label: "اسم الملف"
+      control: dropdown
       order: 4
-      placeholder: "Search by title..."
-    # promulgation_date is intentionally NOT listed here: it's filterable
-    # via the API but not exposed as a UI control in this project.
-  result_card_fields: [document_type, publication_date, title]
+      placeholder: "اختر الملفات"
+    law_number:
+      label: "رقم القانون"
+      control: text
+      order: 6
+      placeholder: "ابدأ بكتابة رقم القانون..."
+    document_type:
+      label: "نوع الوثيقة"
+      control: dropdown
+      order: 5
+    publication_date:
+      label: "تاريخ النشر"
+      order: 7
+      placeholder: "شهر / سنة"
+    promulgation_date:
+      label: "تاريخ الإصدار"
+      order: 8
+      placeholder: "شهر / سنة"
+  result_card_fields: [document_type, publication_date, promulgation_date, file_name, law_number]

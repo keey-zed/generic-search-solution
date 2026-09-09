@@ -120,13 +120,13 @@ source reading required), and `docs/custom-vs-generic.md`'s promotion
 decision procedure. See `docs/custom-layer-template.md`,
 `docs/fuzzy-title-filter.md`, `docs/custom-vs-generic.md`.
 
-### Phase 4 — First pilot (`app/custom/legal_pilot/`)
+### Phase 4 — First legal project (`app/custom/legal/`)
 
 **Type:** Fixed / Added
 **Touches:** none under `app/core/`/`app/api/` — that's the point.
 
 The pilot itself is project-specific, not a core change — see
-`docs/pilot-notes.md`, which records the two points that were briefly
+`docs/custom-vs-generic.md`, which records the two points that were briefly
 considered as possible core changes during the pilot (query-time
 semantic embedding; an `allowed_values` declaration for dropdown
 enums) and why neither qualified. **Zero files under `app/core/` or

@@ -57,8 +57,8 @@ as the pattern to follow:
 2. **A pilot-style Definition-of-Done smoke test**, proving your project
    runs entirely from `config.yaml` + custom layer with zero files
    touched under `app/core/`/`app/api/`. Copy the pattern from
-   `tests/test_pilot_definition_of_done.py`, not its content — that
-   file is `legal_pilot`-specific.
+   `tests/test_custom_layer_template.py`, not its content — the legal
+   project is the canonical project-specific example.
 3. **A config-mutation test**, if this project exposes the frontend
    contract (`/config`, `/facets`), proving that changing your own
    `config.yaml` alone changes those endpoints' output with zero code

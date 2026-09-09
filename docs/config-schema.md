@@ -29,6 +29,23 @@ frontend:                # presentation layer
     logo_url: string | null
     primary_color: "#RRGGBB" | null
     search_placeholder: string | null
+    semantic_search_placeholder: string | null
+    direction: ltr | rtl
+  labels:                # optional localized labels for the shared UI shell
+    search_button: string
+    show_filters: string
+    hide_filters: string
+    reset: string
+    apply_filters: string
+    result_count: string
+    no_results: string
+    empty_state: string
+    previous: string
+    next: string
+    semantic_search: string
+    semantic_search_hint: string
+    semantic_search_placeholder: string
+    facets_error: string
   filters:                # subset of `filters:` — which get a UI control
     <field_name>:
       label: string

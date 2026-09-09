@@ -25,7 +25,7 @@ pages, whatever) into memory as plain Python dicts shaped like:
 
 This is `load_raw_records()` in your project's `raw_loader.py` (see
 step 5) — see `docs/ingestion.md` for the exact contract and
-`app/custom/legal_pilot/raw_loader.py` / `app/custom/books/raw_loader.py`
+`app/custom/legal/raw_loader.py` / `app/custom/books/raw_loader.py`
 for two real, filled-in examples of different shapes.
 
 **Don't** validate types or filter/search anything here — that's every
@@ -43,7 +43,7 @@ documents).
 
 If this project has no semantic search need yet, skip this step and
 set `search.semantic.enabled: false` in step 4 — lexical-only is a
-fully supported configuration (`docs/pilot-notes.md` §1 records why
+fully supported configuration (`docs/semantic-search.md` records why
 query-time text embedding specifically is a known, deliberate gap, not
 an oversight).
 
@@ -118,14 +118,14 @@ this into an existing Flask app instead of getting a standalone one.
 Run the generic test suite baseline (`docs/test-suite-baseline.md`)
 against your project, and write your own pilot-style Definition-of-Done
 test proving zero files under `app/core/`/`app/api/` were touched — see
-`tests/test_pilot_definition_of_done.py` for the exact pattern to copy.
+`tests/test_custom_layer_template.py` for the exact pattern to copy.
 
 ## Reference: an existing project to read alongside this checklist
 
-`app/custom/legal_pilot/` went through every step above for real — its
+`app/custom/legal/` went through every step above for real — its
 `config.yaml`, `raw_loader.py`, `custom_filters.py` (empty — no override
 was needed), and `bootstrap.py` are a complete, working answer to "what
-does 'done' look like." `docs/pilot-notes.md` also records the two
+does 'done' look like."
 things that were briefly considered as core changes during that
 process and why neither qualified — worth reading before you convince
 yourself something needs a core edit.

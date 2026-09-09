@@ -243,6 +243,8 @@ class BrandingConfig(BaseModel):
     logo_url: Optional[str] = None
     primary_color: Optional[str] = None
     search_placeholder: Optional[str] = None
+    semantic_search_placeholder: Optional[str] = None
+    direction: Literal["ltr", "rtl"] = "ltr"
 
     @field_validator("title")
     @classmethod
@@ -261,10 +263,38 @@ class BrandingConfig(BaseModel):
         return v
 
 
+class FrontendLabels(BaseModel):
+    """Localized labels for generic search-shell actions.
+
+    Filter labels remain per-filter under ``frontend.filters``. These labels
+    cover only the shared shell, so a project can change language and UX copy
+    without editing the frontend implementation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    search_button: str = "Search"
+    admin_link: str = "Admin"
+    show_filters: str = "Show advanced filters"
+    hide_filters: str = "Hide filters"
+    reset: str = "Reset"
+    apply_filters: str = "Apply filters"
+    result_count: str = "Results"
+    no_results: str = "No results found."
+    empty_state: str = "Start searching to view results."
+    previous: str = "Previous"
+    next: str = "Next"
+    semantic_search: str = "Enable semantic search (optional)"
+    semantic_search_hint: str = "Semantic search is used only when one query is entered."
+    semantic_search_placeholder: str = "Enter one legal query; multiple lines are supported."
+    facets_error: str = "Unable to load filter options from the server."
+
+
 class FrontendConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     branding: BrandingConfig
+    labels: FrontendLabels = Field(default_factory=FrontendLabels)
     # Only fields listed here get a rendered UI control. A field present
     # under `filters:` but absent here remains filterable via the API but
     # is NOT shown in the UI. This is a deliberate opt-in default: a

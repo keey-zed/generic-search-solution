@@ -20,7 +20,7 @@ _DOC_PATH = Path(__file__).parent.parent / "docs" / "frontend-control-mapping.md
 
 
 def _payload_contract_section() -> str:
-    text = _DOC_PATH.read_text()
+    text = _DOC_PATH.read_text(encoding="utf-8")
     match = re.search(
         r"## Payload contract.*?\n(.*?)\n## ", text, flags=re.DOTALL
     )

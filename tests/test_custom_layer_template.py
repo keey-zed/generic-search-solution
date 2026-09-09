@@ -139,11 +139,14 @@ def legal_engine():
 
 def test_legal_project_builds_via_the_template_pattern(legal_engine):
     assert set(legal_engine._filters.keys()) == {
+        "mandatory_keywords",
+        "subjects",
+        "signatures",
+        "file_name",
+        "law_number",
         "document_type",
         "publication_date",
         "promulgation_date",
-        "subjects",
-        "title",
     }
 
 
