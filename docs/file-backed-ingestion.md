@@ -58,10 +58,13 @@ the PDF filename or its relative path:
 }
 ```
 
-`document_type` defaults to `bulletin_officiel`; a sidecar value replaces
-it. This is deliberately data/configuration, not a legal-specific rule in
-the extractor. No dates, titles, legal status, or subjects are guessed
-from the filename.
+`document_type` defaults to `bulletin_officiel`; selectable-text pages are
+then enriched by the legal metadata extractor and a sidecar value replaces
+any automatically extracted value. The extractor derives issue dates and
+legal-act candidates from visible Arabic text, but it is intentionally
+conservative: values are candidates for filtering, not a substitute for
+authoritative review. Scanned pages without native text are skipped and
+require OCR before they can contribute searchable records.
 
 The extractor reports empty pages as warnings and does not index them.
 That usually means a scanned PDF and requires an OCR stage before those

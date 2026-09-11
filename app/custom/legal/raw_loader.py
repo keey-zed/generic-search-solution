@@ -18,6 +18,8 @@ from typing import Any, Mapping
 
 from app.ingestion import extract_pdf_records
 
+from .metadata_extractor import extract_legal_metadata
+
 _SAMPLE_RECORDS: list[dict[str, Any]] = [
     {
         "id": "legal-1",
@@ -132,6 +134,8 @@ def load_raw_records(
         metadata = record["metadata"]
         metadata.setdefault("file_name", metadata["source_file"])
 
+    _add_extracted_metadata(extraction.records)
+
     errors = [issue for issue in extraction.issues if issue.severity == "error"]
     if errors:
         details = "; ".join(
@@ -145,3 +149,67 @@ def load_raw_records(
             "the PDFs may be scanned and require an OCR stage"
         )
     return extraction.records
+
+
+_ISSUE_FIELDS = {"publication_date", "issue_number"}
+_ACT_FIELDS = {
+    "document_type",
+    "law_number",
+    "promulgation_date",
+    "signatures",
+    "subjects",
+    "mandatory_keywords",
+    "title",
+}
+
+
+def _add_extracted_metadata(records: list[dict[str, Any]]) -> None:
+    """Enrich page records while preserving sidecar values.
+
+    ``extract_pdf_records`` intentionally knows nothing about legal fields.
+    This custom layer supplies them from selectable text.  Issue-level values
+    are propagated to every page; act-level values are carried forward across
+    continuation pages until a later page exposes a new value.  A value that
+    already exists (for example, from ``metadata.json``) is authoritative.
+    """
+    if not records:
+        return
+
+    records_by_source: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        source_file = str(record["metadata"].get("source_file", ""))
+        records_by_source.setdefault(source_file, []).append(record)
+
+    for source_file, source_records in records_by_source.items():
+        combined_text = "\n".join(str(record.get("text", "")) for record in source_records)
+        issue_metadata = extract_legal_metadata(combined_text, source_file)
+        carried: dict[str, Any] = {}
+
+        for record in sorted(
+            source_records,
+            key=lambda item: int(item["metadata"].get("source_page", 0)),
+        ):
+            metadata = record["metadata"]
+            page_metadata = extract_legal_metadata(record.get("text", ""), source_file)
+
+            # Sidecar/file metadata wins. Auto extraction only fills missing
+            # fields, except for the generic default document type.
+            for field in _ISSUE_FIELDS:
+                if field not in metadata and field in issue_metadata:
+                    metadata[field] = issue_metadata[field]
+
+            if metadata.get("document_type") in (None, "bulletin_officiel"):
+                page_type = page_metadata.get("document_type")
+                detected_type = (
+                    page_type
+                    if page_type and page_type != "bulletin_officiel"
+                    else issue_metadata.get("document_type")
+                )
+                if detected_type:
+                    metadata["document_type"] = detected_type
+
+            for field in _ACT_FIELDS - {"document_type"}:
+                if field in page_metadata:
+                    carried[field] = page_metadata[field]
+                if field not in metadata and field in carried:
+                    metadata[field] = carried[field]
