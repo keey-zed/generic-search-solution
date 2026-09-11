@@ -53,6 +53,7 @@ app/custom/     One folder per project — config.yaml + raw_loader.py + custom_
   _template/      copy this to start a new project
   legal/          the canonical legal search project and Phase 4/5 pilot
   books/          the source doc's own §4 fuzzy-title-matching example
+  employment/     normalized SQLite-backed public-employment search example
 
 tests/          Generic tests (travel with every copy) + project-specific tests (written per project)
 docs/           One doc per concern — see the index below
@@ -106,6 +107,9 @@ of this README is a reference index, not a tutorial.
 
 **Legal project (Phase 4):**
 - `docs/file-backed-ingestion.md` — reading real files off disk for the legal project's `raw_loader.py`.
+
+**Public-employment database project:**
+- `docs/employment-db-use-case.md` — normalized SQLite tables, configurable filters, and API runner.
 
 **Frontend contract (Phase 5):**
 - `docs/frontend-control-mapping.md` — the config→control mapping and the exact payload shape each control must produce.

@@ -12,4 +12,9 @@ wheels/
 # Ignore data and large pickle files
 *.pickle
 *.pkl
-data/
+data/*
+
+# Small, checked-in fixture for the normalized employment DB pilot.
+!data/employment/
+!data/employment/employment_seed.sql
+!data/employment/employment.db

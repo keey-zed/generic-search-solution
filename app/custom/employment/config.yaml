@@ -1,0 +1,173 @@
+# Public employment platform search example backed by normalized SQLite tables.
+
+schema_version: 1
+
+filters:
+  title:
+    type: string
+    required: true
+    operation: contains
+  organization:
+    type: string
+    required: true
+    operation: equality
+  ministry:
+    type: string
+    required: true
+    operation: equality
+  region:
+    type: string
+    required: true
+    operation: equality
+  city:
+    type: string
+    required: true
+    operation: equality
+  contract_type:
+    type: string
+    required: true
+    operation: equality
+  employment_type:
+    type: string
+    required: true
+    operation: equality
+  education_level:
+    type: string
+    required: true
+    operation: equality
+  grade:
+    type: string
+    required: false
+    operation: equality
+  skills:
+    type: list
+    item_type: string
+    required: false
+    operation: contains
+  publication_date:
+    type: date
+    required: true
+    operation: range
+  deadline:
+    type: date
+    required: true
+    operation: range
+  salary_min:
+    type: int
+    required: false
+    operation: range
+  salary_max:
+    type: int
+    required: false
+    operation: range
+  remote:
+    type: bool
+    required: true
+    operation: equality
+  status:
+    type: string
+    required: true
+    operation: equality
+
+search:
+  semantic:
+    enabled: false
+  lexical:
+    enabled: true
+  ranking:
+    strategy: weighted_sum
+    weights:
+      semantic: 0
+      lexical: 1
+  pagination:
+    default_page_size: 20
+    max_page_size: 100
+
+frontend:
+  branding:
+    title: "التوظيف العمومي"
+    page_title: "التوظيف العمومي — البحث عن عروض الشغل"
+    subtitle: "ابحث عن مباريات وعروض الشغل في القطاع العمومي"
+    favicon_url: "/assets/employment_favicon.ico"
+    primary_color: "#0B6E69"
+    search_placeholder: "ابحث عن مهنة أو كفاءة أو مؤسسة..."
+    direction: rtl
+  labels:
+    search_button: "بحث"
+    show_filters: "إظهار المرشحات"
+    hide_filters: "إخفاء المرشحات"
+    reset: "إعادة الضبط"
+    apply_filters: "تطبيق المرشحات"
+    result_count: "النتائج"
+    no_results: "لا توجد عروض شغل تطابق بحثك."
+    empty_state: "ابدأ البحث عن عرض شغل في القطاع العمومي."
+    previous: "السابق"
+    next: "التالي"
+    facets_error: "تعذر تحميل خيارات المرشحات."
+  filters:
+    title:
+      label: "المهنة أو المسمى الوظيفي"
+      control: text
+      order: 1
+      placeholder: "مثال: مهندس معلوماتية"
+    ministry:
+      label: "الوزارة"
+      control: dropdown
+      order: 2
+    organization:
+      label: "المؤسسة"
+      control: dropdown
+      order: 3
+    region:
+      label: "الجهة"
+      control: dropdown
+      order: 4
+    city:
+      label: "المدينة"
+      control: dropdown
+      order: 5
+    contract_type:
+      label: "نوع العقد"
+      control: radio
+      order: 6
+    employment_type:
+      label: "نوع التوظيف"
+      control: radio
+      order: 7
+    education_level:
+      label: "المستوى الدراسي"
+      control: dropdown
+      order: 8
+    grade:
+      label: "الدرجة"
+      control: dropdown
+      order: 9
+    skills:
+      label: "الكفاءات"
+      control: multi_select
+      order: 10
+    publication_date:
+      label: "تاريخ النشر"
+      control: date_range
+      order: 11
+    deadline:
+      label: "آخر أجل للترشيح"
+      control: date_range
+      order: 12
+    salary_min:
+      label: "الحد الأدنى للأجر (بالدرهم)"
+      control: number_range
+      order: 13
+    salary_max:
+      label: "الحد الأقصى للأجر (بالدرهم)"
+      control: number_range
+      order: 14
+    remote:
+      label: "العمل عن بعد"
+      control: toggle
+      order: 15
+    status:
+      label: "الحالة"
+      control: radio
+      order: 16
+  result_card_fields: [title, organization, city, contract_type, education_level, deadline, salary_min, salary_max]
