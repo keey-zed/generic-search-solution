@@ -105,8 +105,8 @@ def test_config_endpoint_exposes_resolved_frontend_contract(client):
         "publication_date",
         "promulgation_date",
     ]
-    assert body["filters"][0]["operation"] == "equality"
-    assert body["filters"][0]["control"] == "dropdown"
+    assert body["filters"][0]["operation"] == "contains"
+    assert body["filters"][0]["control"] == "text"
     assert body["search"] == {"lexical": True, "semantic": True, "semantic_text": False}
     assert body["pagination"]["max_page_size"] == 100
 
@@ -128,7 +128,7 @@ def test_facets_endpoint_exposes_only_visible_filter_data(client):
     assert facets["publication_date"]["min"] == "2019-12-31"
     assert facets["publication_date"]["max"] == "2022-06-01"
     assert {entry["value"] for entry in facets["document_type"]["values"]} == {
-        "arrete", "dahir", "decret", "loi"
+        "9anoun", "dahir", "marsoum"
     }
     assert facets["mandatory_keywords"]["available_count"] == 4
     assert "values" not in facets["mandatory_keywords"]
@@ -150,6 +150,33 @@ def test_source_endpoint_is_optional_and_serves_only_through_a_resolver(legal_en
         response = test_client.get("/api/documents/legal-1/source")
     assert response.status_code == 200
     assert response.data.startswith(b'"""')
+
+
+def test_source_endpoint_serves_bytes_from_a_non_filesystem_resolver(legal_engine):
+    """A resolver backed by a database (or any non-filesystem store) can
+    return raw bytes instead of a Path -- the generic contract doesn't
+    assume filesystem storage. See app/api/http.py's SourceFileResolver."""
+    app = create_http_app(legal_engine, source_file_resolver=lambda _document: b"%PDF-1.4 fake content")
+    with app.test_client() as test_client:
+        response = test_client.get("/api/documents/legal-1/source")
+    assert response.status_code == 200
+    assert response.data == b"%PDF-1.4 fake content"
+
+
+def test_source_endpoint_rejects_empty_bytes_as_unavailable(legal_engine):
+    app = create_http_app(legal_engine, source_file_resolver=lambda _document: b"")
+    with app.test_client() as test_client:
+        response = test_client.get("/api/documents/legal-1/source")
+    assert response.status_code == 404
+    assert response.get_json()["error"]["type"] == "SourceUnavailable"
+
+
+def test_source_endpoint_rejects_none_from_resolver(legal_engine):
+    app = create_http_app(legal_engine, source_file_resolver=lambda _document: None)
+    with app.test_client() as test_client:
+        response = test_client.get("/api/documents/legal-1/source")
+    assert response.status_code == 404
+    assert response.get_json()["error"]["type"] == "SourceUnavailable"
 
 
 def test_source_endpoint_is_not_exposed_without_a_resolver(client):

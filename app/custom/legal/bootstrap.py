@@ -19,6 +19,7 @@ from app.core.ingestion import ingest_raw_records
 from app.embeddings import load_or_create_document_embeddings
 
 from . import custom_filters, raw_loader
+from .db_raw_loader import load_raw_records_from_db
 
 _DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
@@ -30,18 +31,31 @@ def build_search_engine(
     text_embedder: Optional[TextEmbedder] = None,
     documents_dir: Optional[Union[str, Path]] = None,
     metadata_path: Optional[Union[str, Path]] = None,
+    db_path: Optional[Union[str, Path]] = None,
     embeddings_cache_path: Optional[Union[str, Path]] = None,
 ) -> SearchEngine:
-    """Build the legal engine from the sample corpus or real PDF files.
+    """Build the legal engine from the sample corpus, real PDF files, or
+    a SQLite database.
 
-    Pass ``documents_dir`` to index its PDFs one page at a time.  An
-    optional ``metadata_path`` points at the JSON sidecar described in
-    :func:`app.custom.legal.raw_loader.load_raw_records`.
+    Pass ``documents_dir`` to index PDFs one page at a time (see
+    raw_loader.py). Pass ``db_path`` instead to read the same shape of
+    records from a SQLite database produced by
+    scripts/migrate_legal_pdfs_to_sqlite.py -- see db_raw_loader.py.
+    These are mutually exclusive; passing neither uses the small
+    embedded sample corpus (raw_loader.py's default). ``metadata_path``
+    only applies to the ``documents_dir`` path -- a DB-backed corpus's
+    metadata already lives in the database itself (baked in at
+    migration time); there is no separate sidecar to apply on top of it.
     """
+    if documents_dir is not None and db_path is not None:
+        raise ValueError("pass either documents_dir or db_path, not both")
     config = load_use_case_config(config_path)
     schema = config.to_metadata_schema()
 
-    raw_records = raw_loader.load_raw_records(documents_dir, metadata_path=metadata_path)
+    if db_path is not None:
+        raw_records = load_raw_records_from_db(db_path)
+    else:
+        raw_records = raw_loader.load_raw_records(documents_dir, metadata_path=metadata_path)
     report = ingest_raw_records(raw_records, schema)
 
     if not report.is_clean:

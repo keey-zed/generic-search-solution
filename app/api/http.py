@@ -72,6 +72,7 @@ app may already have its own CORS policy) but accepts the same
 """
 from __future__ import annotations
 
+import io
 import logging
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, Union
@@ -89,7 +90,24 @@ logger = logging.getLogger("app.api.http")
 
 # The use-case layer maps an indexed document to an original file. The HTTP
 # layer never builds a filesystem path from a client-provided document ID.
-SourceFileResolver = Callable[[NormalizedDocument], Optional[Path]]
+SourceFileResolver = Callable[[NormalizedDocument], Union[Path, bytes, None]]
+"""A use-case adapter resolving a document's original source.
+
+Returns:
+  - a `Path` to a file on the local filesystem (the original,
+    file-backed case -- e.g. `app/custom/legal/source_resolver.py`), or
+  - raw `bytes` of the source content, for any non-filesystem storage
+    (a database BLOB, object storage, ...) -- e.g. a DB-backed project's
+    resolver reading a PDF blob out of a `sources` table, or
+  - `None` if this document has no resolvable source.
+
+Kept generic on purpose: `app/api/http.py` never needs to know HOW a
+project stores its original files, only that it can get either a path
+or bytes back. A project supplies whichever one matches its own storage
+-- this is not a database-specific or filesystem-specific concept, it's
+"how do I get this document's original bytes", which every project
+needs some answer to regardless of storage backend.
+"""
 
 
 def _error_response(status: int, error_type: str, message: str, *, details: Any = None):
@@ -252,13 +270,31 @@ def create_search_blueprint(
         if source_file_resolver is None:
             return _error_response(404, "SourceUnavailable", "source file is not available")
         try:
-            source_path = source_file_resolver(indexed_document)
+            resolved = source_file_resolver(indexed_document)
         except (OSError, ValueError) as exc:
             logger.warning("source resolver rejected document %r: %s", document_id, exc)
-            source_path = None
-        if not isinstance(source_path, Path) or not source_path.is_file():
-            return _error_response(404, "SourceUnavailable", "source file is not available")
-        return send_file(source_path, conditional=True)
+            resolved = None
+
+        if isinstance(resolved, Path):
+            if not resolved.is_file():
+                return _error_response(404, "SourceUnavailable", "source file is not available")
+            return send_file(resolved, conditional=True)
+
+        if isinstance(resolved, (bytes, bytearray)):
+            if not resolved:
+                return _error_response(404, "SourceUnavailable", "source file is not available")
+            # No filesystem path to infer a filename/mimetype from --
+            # `conditional=True` (range requests, ETags) still applies,
+            # send_file computes those from the in-memory buffer itself.
+            return send_file(
+                io.BytesIO(bytes(resolved)),
+                mimetype="application/octet-stream",
+                as_attachment=False,
+                download_name=Path(document_id).name or document_id,
+                conditional=True,
+            )
+
+        return _error_response(404, "SourceUnavailable", "source file is not available")
 
     @blueprint.post("/search")
     def search():
